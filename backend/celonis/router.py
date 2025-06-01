@@ -77,6 +77,25 @@ async def send_response(
         await websocket.send_text(json.dumps(message))
 
 
+def create_log_callback(websocket: WebSocket):
+    """Create a log callback function for forwarding log messages via websocket.
+
+    Args:
+        websocket: The WebSocket connection to forward messages to
+
+    Returns:
+        A callback function that accepts (level, message) and forwards them
+    """
+
+    async def log_callback(level: str, message: str):
+        """Forward log message via websocket."""
+        await send_response(
+            websocket, ServerResponse.LOG_MESSAGE, {"level": level, "message": message}
+        )
+
+    return log_callback
+
+
 router = APIRouter(prefix="/celonis", tags=["celonis"])
 
 
@@ -178,7 +197,9 @@ async def handle_start_login(websocket: WebSocket, session: dict, command_data: 
         if session["client"]:
             await session["client"].close()
 
-        session["client"] = CelonisClient(username, password)
+        # Create log callback for this session's websocket
+        log_callback = create_log_callback(websocket)
+        session["client"] = CelonisClient(username, password, log_callback)
 
         response = await session["client"].login()
 

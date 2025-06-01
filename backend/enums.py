@@ -23,3 +23,4 @@ class ServerResponse(str, Enum):
     TYPES_CREATION_COMPLETE = "types_creation_complete"
     ERROR = "error"
     CLOSED = "closed"
+    LOG_MESSAGE = "log_message"

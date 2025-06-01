@@ -166,6 +166,42 @@ All commands are sent as JSON with the following structure:
 **Response:**
 - `closed`: Session closed successfully
 
+### Log Messages
+
+The server automatically forwards session-specific log messages during operations. These messages provide real-time feedback about what's happening in your session.
+
+**Log Message Format:**
+```json
+{
+  "type": "log_message",
+  "level": "info|warning", 
+  "message": "Log message content"
+}
+```
+
+**Examples:**
+```json
+{
+  "type": "log_message",
+  "level": "info",
+  "message": "Processing MFA authentication."
+}
+```
+
+```json
+{
+  "type": "log_message", 
+  "level": "warning",
+  "message": "'SomeType' already exists; skipping"
+}
+```
+
+**Log Levels:**
+- `info`: Informational messages about operation progress
+- `warning`: Non-critical issues that don't stop the operation
+
+Log messages are session-specific - you only receive logs from your own operations, not from other concurrent sessions.
+
 ### Response Format
 
 All responses follow this format:

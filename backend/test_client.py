@@ -112,9 +112,21 @@ async def test_websocket_client():
             print("Sending MFA code...")
             await websocket.send(json.dumps(mfa_command))
 
-            response = await websocket.recv()
-            response_data = json.loads(response)
-            print(f"MFA response: {response_data}")
+            # Handle potential log messages during MFA
+            while True:
+                response = await websocket.recv()
+                response_data = json.loads(response)
+
+                if response_data.get("type") == "log_message":
+                    level = response_data.get("level", "info")
+                    message = response_data.get("message", "")
+                    level_color = (
+                        "\033[94m" if level == "info" else "\033[93m"
+                    )  # Blue for info, Yellow for warning
+                    print(f"{level_color}[{level.upper()}]\033[0m {message}")
+                else:
+                    print(f"MFA response: {response_data}")
+                    break
 
         # Step 4: Process data if login was successful
         if response_data.get("type") in ["login_success", "mfa_success"]:
@@ -130,14 +142,22 @@ async def test_websocket_client():
             while True:
                 response = await websocket.recv()
                 response_data = json.loads(response)
-                print(f"Processing response: {response_data}")
 
-                if response_data.get("type") == "types_creation_complete":
+                if response_data.get("type") == "log_message":
+                    level = response_data.get("level", "info")
+                    message = response_data.get("message", "")
+                    level_color = (
+                        "\033[94m" if level == "info" else "\033[93m"
+                    )  # Blue for info, Yellow for warning
+                    print(f"{level_color}[{level.upper()}]\033[0m {message}")
+                elif response_data.get("type") == "types_creation_complete":
                     print("✓ Processing completed successfully!")
                     break
                 elif response_data.get("type") == "error":
                     print(f"✗ Error during processing: {response_data.get('message')}")
                     break
+                else:
+                    print(f"Processing response: {response_data}")
 
         # Step 5: Close the session
         close_command = {"command": "close"}

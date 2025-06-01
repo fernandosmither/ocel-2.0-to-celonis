@@ -5,6 +5,7 @@ import re
 import logging
 from dotenv import load_dotenv
 import os
+from typing import Callable, Optional, Awaitable
 
 from cloudflare.client import R2Client
 
@@ -46,17 +47,37 @@ CATEGORIES = [
 class CelonisClient:
     """Client for interacting with Celonis API."""
 
-    def __init__(self, username: str, password: str):
+    def __init__(
+        self,
+        username: str,
+        password: str,
+        log_callback: Optional[Callable[[str, str], Awaitable[None]]] = None,
+    ):
         """Initialize the Celonis client.
 
         Args:
             username: Celonis username
             password: Celonis password
+            log_callback: Optional async callback function for forwarding log messages.
+                         Should accept (level, message) where level is "info" or "warning"
         """
         self.client = httpx.AsyncClient(follow_redirects=False, timeout=30.0)
         self.csrf_token = None
         self.username = username
         self.password = password
+        self.log_callback = log_callback
+
+    async def _log_info(self, message: str):
+        """Log an info message and forward via callback if available."""
+        logger.info(message)
+        if self.log_callback:
+            await self.log_callback("info", message)
+
+    async def _log_warning(self, message: str):
+        """Log a warning message and forward via callback if available."""
+        logger.warning(message)
+        if self.log_callback:
+            await self.log_callback("warning", message)
 
     async def _get_csrf_token(self):
         """Initialize session and get CSRF token."""
@@ -89,7 +110,7 @@ class CelonisClient:
         Returns:
             bool: True if MFA was successful, False otherwise
         """
-        logger.info("Processing MFA authentication.")
+        await self._log_info("Processing MFA authentication.")
 
         # Update CSRF token from response cookies if available
         if "XSRF-TOKEN" in self.client.cookies:
@@ -117,7 +138,7 @@ class CelonisClient:
 
         logger.info(f"MFA Response Status Code: {mfa_response.status_code}")
         if mfa_response.status_code == 200:
-            logger.info("MFA authentication successful.")
+            await self._log_info("MFA authentication successful.")
             return True
         else:
             logger.error("MFA authentication failed.")
@@ -181,15 +202,15 @@ class CelonisClient:
             Exception: If download or parsing fails
         """
         try:
-            logger.info(f"Downloading jsonocel from R2 with UUID: {file_uuid}")
+            await self._log_info(f"Downloading jsonocel from R2 with UUID: {file_uuid}")
 
             r2_client = R2Client()
             file_content = await r2_client.download_file(file_uuid)
 
-            logger.info("Download complete, parsing JSON...")
+            await self._log_info("Download complete, parsing JSON...")
             data = json.loads(file_content.decode("utf-8"))
 
-            logger.info("Jsonocel file parsed successfully")
+            await self._log_info("Jsonocel file parsed successfully")
             return data
 
         except Exception as e:
@@ -210,7 +231,7 @@ class CelonisClient:
         """
         return await self.download_jsonocel_from_r2(identifier)
 
-    def _sanitize_name(self, raw: str) -> str:
+    async def _sanitize_name(self, raw: str) -> str:
         """Sanitize a name to ensure it's valid for Celonis.
 
         Args:
@@ -223,15 +244,15 @@ class CelonisClient:
         # ensure starts with letter
         if not raw or not raw[0].isalpha():
             chars.append("A")
-            logger.warning(f"Name '{raw}' invalid start; prepending 'A'")
+            await self._log_warning(f"Name '{raw}' invalid start; prepending 'A'")
         for c in raw:
             if c.isalnum():
                 chars.append(c)
             else:
-                logger.warning(f"Stripping invalid '{c}' from '{raw}'")
+                await self._log_warning(f"Stripping invalid '{c}' from '{raw}'")
         return "".join(chars)
 
-    def _sanitize_fields(self, fields: list[dict]) -> list[dict]:
+    async def _sanitize_fields(self, fields: list[dict]) -> list[dict]:
         """Sanitize field names in a list of field dictionaries.
 
         Args:
@@ -245,10 +266,10 @@ class CelonisClient:
             name = f["name"]
             if not name or not name[0].isalpha():
                 name = "A" + name
-                logger.warning(f"Field name invalid start; became '{name}'")
+                await self._log_warning(f"Field name invalid start; became '{name}'")
             cleaned = "".join(ch for ch in name if ch.isalnum())
             if cleaned != name:
-                logger.warning(f"Sanitized field name '{name}' → '{cleaned}'")
+                await self._log_warning(f"Sanitized field name '{name}' → '{cleaned}'")
             f["name"] = cleaned
             out.append(f)
         return out
@@ -269,7 +290,7 @@ class CelonisClient:
             include_color: Whether to include color in the payload
         """
         for it in items:
-            name = self._sanitize_name(it["name"])
+            name = await self._sanitize_name(it["name"])
 
             fields = [
                 {
@@ -289,7 +310,7 @@ class CelonisClient:
                 fields.append(
                     {"name": "Time", "namespace": "custom", "dataType": "CT_INSTANT"}
                 )
-            fields = self._sanitize_fields(fields)
+            fields = await self._sanitize_fields(fields)
 
             payload = {
                 "name": name,
@@ -305,14 +326,16 @@ class CelonisClient:
             resp = await self.client.post(endpoint, json=payload)
             try:
                 resp.raise_for_status()
-                logger.info(f"✓ Created {endpoint.split('/')[-1][:-1]} type '{name}'")
+                await self._log_info(
+                    f"✓ Created {endpoint.split('/')[-1][:-1]} type '{name}'"
+                )
             except httpx.HTTPStatusError as e:
                 body = resp.json()
                 if (
                     resp.status_code == 400
                     and body.get("errors", [{}])[0].get("errorCode") == "ALREADY_EXISTS"
                 ):
-                    logger.warning(f"'{name}' already exists; skipping")
+                    await self._log_warning(f"'{name}' already exists; skipping")
                 else:
                     import traceback
 
