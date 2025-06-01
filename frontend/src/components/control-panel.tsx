@@ -19,7 +19,6 @@ export default function ControlPanel() {
     connect,
     disconnect,
     sendCommand,
-    setUploadedFileUuid,
     setUploadProgress,
     setUploading,
     setFileReady,
