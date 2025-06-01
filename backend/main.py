@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from config import settings
 from celonis.router import router as celonis_router, session_manager, cleanup_task
 from cloudflare.router import router as cloudflare_router
+from fastapi.middleware.cors import CORSMiddleware
 
 
 @asynccontextmanager
@@ -24,6 +25,14 @@ env_config = {
 }
 
 app = FastAPI(**env_config)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "https://ocelonis.fdosmith.dev"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/")
