@@ -53,7 +53,7 @@ class CelonisClient:
             username: Celonis username
             password: Celonis password
         """
-        self.client = httpx.AsyncClient(follow_redirects=False)
+        self.client = httpx.AsyncClient(follow_redirects=False, timeout=30.0)
         self.csrf_token = None
         self.username = username
         self.password = password

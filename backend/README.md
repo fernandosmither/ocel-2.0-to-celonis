@@ -38,7 +38,7 @@ CLOUDFLARE_R2_SECRET_ACCESS_KEY=your_secret_key
 ## Running the Server
 
 ```bash
-fastapi dev
+just dev
 ```
 
 The server will start on `http://localhost:8000` with:

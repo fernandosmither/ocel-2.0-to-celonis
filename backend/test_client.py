@@ -24,20 +24,45 @@ async def test_websocket_client():
 
     if file_path and os.path.exists(file_path):
         print(f"Uploading {file_path} to R2...")
+        print(f"File size: {os.path.getsize(file_path) / (1024*1024):.2f} MB")
 
-        # Upload file to get UUID
-        with open(file_path, "rb") as f:
-            files = {"file": f}
-            upload_response = httpx.post(
-                "http://localhost:8000/cloudflare/upload", files=files
-            )
+        try:
+            # Upload file to get UUID with timeout configuration
+            print("Opening file...")
+            with open(file_path, "rb") as f:
+                files = {"file": f}
+                print("Sending POST request to upload endpoint...")
 
-        if upload_response.status_code == 200:
-            upload_data = upload_response.json()
-            file_uuid = upload_data["uuid"]
-            print(f"✅ File uploaded successfully! UUID: {file_uuid}")
-        else:
-            print(f"❌ Upload failed: {upload_response.text}")
+                # Configure httpx with timeout
+                timeout = httpx.Timeout(300.0, connect=30.0)  # 5 min total, 30s connect
+                with httpx.Client(timeout=timeout) as client:
+                    upload_response = client.post(
+                        "http://localhost:8000/cloudflare/upload", files=files
+                    )
+
+                print(
+                    f"Received response with status code: {upload_response.status_code}"
+                )
+
+            if upload_response.status_code == 200:
+                upload_data = upload_response.json()
+                file_uuid = upload_data["uuid"]
+                print(f"✅ File uploaded successfully! UUID: {file_uuid}")
+            else:
+                print(f"❌ Upload failed with status {upload_response.status_code}")
+                print(f"Response text: {upload_response.text}")
+                return
+
+        except httpx.TimeoutException as e:
+            print(f"❌ Upload timed out: {e}")
+            print("The file may have been uploaded successfully despite the timeout.")
+            print("Check your Cloudflare R2 bucket to verify.")
+            return
+        except httpx.RequestError as e:
+            print(f"❌ Request error during upload: {e}")
+            return
+        except Exception as e:
+            print(f"❌ Unexpected error during upload: {e}")
             return
     else:
         file_uuid = input("Enter UUID of already uploaded file: ").strip()
@@ -67,8 +92,8 @@ async def test_websocket_client():
         # Step 2: Start login
         login_command = {
             "command": "start_login",
-            "username": os.getenv("CELONIS_USERNAME"),
-            "password": os.getenv("CELONIS_PASSWORD"),
+            "username": input("Enter your Celonis username: "),
+            "password": input("Enter your Celonis password: "),
         }
 
         print("Sending login command...")
@@ -134,3 +159,6 @@ if __name__ == "__main__":
         print("\nTest interrupted by user")
     except Exception as e:
         print(f"\nTest failed with error: {e}")
+        import traceback
+
+        traceback.print_exc()
