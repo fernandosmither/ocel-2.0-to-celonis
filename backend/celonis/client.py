@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # Keeping hardcoded global constants as requested
 BASE_LOGIN_URL = "https://id.celonis.cloud"
 # BASE_URL = "https://academic-celonis-xwmk9z.eu-2.celonis.cloud"
-BASE_URL = " https://academic-lhidalgo1-uc-cl.eu-2.celonis.cloud"
+BASE_URL = "https://academic-lhidalgo1-uc-cl.eu-2.celonis.cloud"
 OBJ_ENDPOINT = f"{BASE_URL}/bl/api/v1/types/objects?environment=develop"
 EVT_ENDPOINT = f"{BASE_URL}/bl/api/v1/types/events?environment=develop"
 
