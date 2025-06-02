@@ -1,290 +1,219 @@
-Welcome to your new TanStack app! 
+# Ocelonis Frontend
 
-# Getting Started
+A modern React frontend for the Ocelonis application - a sophisticated web interface for uploading OCEL 2.0 files to Celonis. Built with React 19, TanStack Router, and Tailwind CSS, featuring real-time WebSocket communication, elegant UI components, and a sleek dark theme.
 
-To run this application:
+## Features
 
+- **Modern React Architecture**: Built with React 19 and TanStack Router for optimal performance
+- **Real-time Communication**: WebSocket integration for live updates and interactive workflows
+- **Elegant UI/UX**: Dark theme with animated gradients, responsive design, and smooth transitions
+- **File Upload Interface**: Drag-and-drop file upload with progress tracking
+- **Authentication Flow**: Secure login with MFA support through modal interfaces
+- **Live Logging**: Real-time log display with session-specific message filtering
+- **Responsive Design**: Mobile-first approach with responsive breakpoints
+- **Modern Styling**: Tailwind CSS with custom animations and shadcn/ui components
+- **Type Safety**: Full TypeScript support with strict type checking
+
+## Technology Stack
+
+- **Framework**: React 19 with TypeScript
+- **Routing**: TanStack Router with file-based routing
+- **Styling**: Tailwind CSS 4 with custom animations
+- **UI Components**: Radix UI primitives with shadcn/ui
+- **State Management**: Zustand for global state
+- **Build Tool**: Vite for fast development and optimized builds
+- **Testing**: Vitest with React Testing Library
+- **Icons**: Lucide React icons
+
+## Installation
+
+This project uses [pnpm](https://pnpm.io/) for package management.
+
+1. Install dependencies:
 ```bash
 pnpm install
-pnpm start  
 ```
 
-# Building For Production
+2. Start the development server:
+```bash
+pnpm start
+```
 
-To build this application for production:
+The application will be available at `http://localhost:3000`
+
+## Development Commands
 
 ```bash
+# Start development server
+pnpm dev
+# or
+pnpm start
+
+# Build for production
 pnpm build
-```
 
-## Testing
+# Preview production build
+pnpm serve
 
-This project uses [Vitest](https://vitest.dev/) for testing. You can run the tests with:
-
-```bash
+# Run tests
 pnpm test
 ```
 
-## Styling
+## Project Structure
 
-This project uses CSS for styling.
-
-
-
-
-## Routing
-This project uses [TanStack Router](https://tanstack.com/router). The initial setup is a file based router. Which means that the routes are managed as files in `src/routes`.
-
-### Adding A Route
-
-To add a new route to your application just add another a new file in the `./src/routes` directory.
-
-TanStack will automatically generate the content of the route file for you.
-
-Now that you have two routes you can use a `Link` component to navigate between them.
-
-### Adding Links
-
-To use SPA (Single Page Application) navigation you will need to import the `Link` component from `@tanstack/react-router`.
-
-```tsx
-import { Link } from "@tanstack/react-router";
+```
+src/
+├── components/           # React components
+│   ├── ui/              # Reusable UI components (shadcn/ui)
+│   ├── header.tsx       # Main header with animated logo
+│   ├── control-panel.tsx # Main control interface
+│   ├── logs-panel.tsx   # Real-time log display
+│   ├── login-modal.tsx  # Authentication modal
+│   └── mfa-modal.tsx    # MFA verification modal
+├── routes/              # TanStack Router routes
+│   ├── __root.tsx       # Root layout component
+│   └── index.tsx        # Main application page
+├── lib/                 # Utility libraries and configurations
+├── styles.css           # Global styles and Tailwind configuration
+└── main.tsx            # Application entry point
 ```
 
-Then anywhere in your JSX you can use it like so:
+## Component Architecture
 
-```tsx
-<Link to="/about">About</Link>
+### Header Component
+- **Logo Integration**: Displays both Ocelonis and HapLab logos
+- **Animated Gradient**: Smooth flowing gradient animation on the title
+- **Responsive Design**: Adapts to different screen sizes
+
+### Control Panel
+- **File Upload**: Drag-and-drop interface with visual feedback
+- **Authentication**: Integrated login flow with MFA support
+- **Process Management**: Step-by-step workflow controls
+- **Real-time Updates**: Live status updates via WebSocket
+
+### Logs Panel
+- **Live Streaming**: Real-time log display with WebSocket integration
+- **Session Filtering**: Shows only logs relevant to the current session
+- **Auto-scroll**: Automatically scrolls to show latest messages
+- **Styled Output**: Formatted log messages with appropriate styling
+
+### Modal System
+- **Login Modal**: Secure credential input with validation
+- **MFA Modal**: Multi-factor authentication code input
+- **Accessible**: Full keyboard navigation and screen reader support
+- **Responsive**: Works seamlessly across all device sizes
+
+## Styling and Theming
+
+The application uses a sophisticated dark theme with:
+
+- **Color Palette**: Black background with gray text and emerald/cyan/purple accents
+- **Typography**: Modern font stack with monospace elements for technical content
+- **Animations**: Smooth transitions and gradient animations using CSS keyframes
+- **Responsive Design**: Mobile-first approach with Tailwind's responsive utilities
+- **Custom Components**: shadcn/ui components customized for the dark theme
+
+## WebSocket Integration
+
+The frontend connects to the backend WebSocket API for:
+
+- **Real-time Logging**: Session-specific log messages
+- **Authentication Flow**: Interactive login and MFA processes
+- **File Processing**: Live updates during OCEL file processing
+- **Session Management**: Automatic session handling and cleanup
+
+### WebSocket Events
+
+```typescript
+// Connection established
+{ type: "connected", session_id: "uuid", message: "..." }
+
+// Log messages
+{ type: "log_message", level: "info|warning", message: "..." }
+
+// Command responses
+{ type: "login_success|mfa_required|error", message: "..." }
 ```
 
-This will create a link that will navigate to the `/about` route.
+## Configuration
 
-More information on the `Link` component can be found in the [Link documentation](https://tanstack.com/router/v1/docs/framework/react/api/router/linkComponent).
+### Environment Variables
 
-### Using A Layout
-
-In the File Based Routing setup the layout is located in `src/routes/__root.tsx`. Anything you add to the root route will appear in all the routes. The route content will appear in the JSX where you use the `<Outlet />` component.
-
-Here is an example layout that includes a header:
-
-```tsx
-import { Outlet, createRootRoute } from '@tanstack/react-router'
-import { TanStackRouterDevtools } from '@tanstack/react-router-devtools'
-
-import { Link } from "@tanstack/react-router";
-
-export const Route = createRootRoute({
-  component: () => (
-    <>
-      <header>
-        <nav>
-          <Link to="/">Home</Link>
-          <Link to="/about">About</Link>
-        </nav>
-      </header>
-      <Outlet />
-      <TanStackRouterDevtools />
-    </>
-  ),
-})
-```
-
-The `<TanStackRouterDevtools />` component is not required so you can remove it if you don't want it in your layout.
-
-More information on layouts can be found in the [Layouts documentation](https://tanstack.com/router/latest/docs/framework/react/guide/routing-concepts#layouts).
-
-
-## Data Fetching
-
-There are multiple ways to fetch data in your application. You can use TanStack Query to fetch data from a server. But you can also use the `loader` functionality built into TanStack Router to load the data for a route before it's rendered.
-
-For example:
-
-```tsx
-const peopleRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/people",
-  loader: async () => {
-    const response = await fetch("https://swapi.dev/api/people");
-    return response.json() as Promise<{
-      results: {
-        name: string;
-      }[];
-    }>;
-  },
-  component: () => {
-    const data = peopleRoute.useLoaderData();
-    return (
-      <ul>
-        {data.results.map((person) => (
-          <li key={person.name}>{person.name}</li>
-        ))}
-      </ul>
-    );
-  },
-});
-```
-
-Loaders simplify your data fetching logic dramatically. Check out more information in the [Loader documentation](https://tanstack.com/router/latest/docs/framework/react/guide/data-loading#loader-parameters).
-
-### React-Query
-
-React-Query is an excellent addition or alternative to route loading and integrating it into you application is a breeze.
-
-First add your dependencies:
+Create a `.env` file in the frontend directory:
 
 ```bash
-pnpm add @tanstack/react-query @tanstack/react-query-devtools
+# API Endpoints (optional - defaults to localhost)
+VITE_API_BASE_URL=http://localhost:8000
+VITE_WS_BASE_URL=ws://localhost:8000
 ```
 
-Next we'll need to create a query client and provider. We recommend putting those in `main.tsx`.
+### Vite Configuration
 
-```tsx
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+The project uses Vite with:
+- React plugin for Fast Refresh
+- TypeScript support
+- Path aliases (`@/` for `src/`)
+- Tailwind CSS integration
 
-// ...
-
-const queryClient = new QueryClient();
-
-// ...
-
-if (!rootElement.innerHTML) {
-  const root = ReactDOM.createRoot(rootElement);
-
-  root.render(
-    <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} />
-    </QueryClientProvider>
-  );
-}
-```
-
-You can also add TanStack Query Devtools to the root route (optional).
-
-```tsx
-import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
-
-const rootRoute = createRootRoute({
-  component: () => (
-    <>
-      <Outlet />
-      <ReactQueryDevtools buttonPosition="top-right" />
-      <TanStackRouterDevtools />
-    </>
-  ),
-});
-```
-
-Now you can use `useQuery` to fetch your data.
-
-```tsx
-import { useQuery } from "@tanstack/react-query";
-
-import "./App.css";
-
-function App() {
-  const { data } = useQuery({
-    queryKey: ["people"],
-    queryFn: () =>
-      fetch("https://swapi.dev/api/people")
-        .then((res) => res.json())
-        .then((data) => data.results as { name: string }[]),
-    initialData: [],
-  });
-
-  return (
-    <div>
-      <ul>
-        {data.map((person) => (
-          <li key={person.name}>{person.name}</li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-export default App;
-```
-
-You can find out everything you need to know on how to use React-Query in the [React-Query documentation](https://tanstack.com/query/latest/docs/framework/react/overview).
-
-## State Management
-
-Another common requirement for React applications is state management. There are many options for state management in React. TanStack Store provides a great starting point for your project.
-
-First you need to add TanStack Store as a dependency:
+## Building for Production
 
 ```bash
-pnpm add @tanstack/store
+# Build the application
+pnpm build
+
+# Preview the build
+pnpm serve
 ```
 
-Now let's create a simple counter in the `src/App.tsx` file as a demonstration.
+The build output will be in the `dist/` directory, ready for deployment to any static hosting service.
 
-```tsx
-import { useStore } from "@tanstack/react-store";
-import { Store } from "@tanstack/store";
-import "./App.css";
+## Testing
 
-const countStore = new Store(0);
+The project uses Vitest with React Testing Library for comprehensive testing:
 
-function App() {
-  const count = useStore(countStore);
-  return (
-    <div>
-      <button onClick={() => countStore.setState((n) => n + 1)}>
-        Increment - {count}
-      </button>
-    </div>
-  );
-}
+```bash
+# Run all tests
+pnpm test
 
-export default App;
+# Run tests in watch mode
+pnpm test --watch
+
+# Run tests with coverage
+pnpm test --coverage
 ```
 
-One of the many nice features of TanStack Store is the ability to derive state from other state. That derived state will update when the base state updates.
+## Browser Support
 
-Let's check this out by doubling the count using derived state.
+- **Modern Browsers**: Chrome 90+, Firefox 88+, Safari 14+, Edge 90+
+- **Mobile**: iOS Safari 14+, Chrome Mobile 90+
+- **Features**: ES2020, CSS Grid, Flexbox, WebSockets, File API
 
-```tsx
-import { useStore } from "@tanstack/react-store";
-import { Store, Derived } from "@tanstack/store";
-import "./App.css";
+## Contributing
 
-const countStore = new Store(0);
+1. Follow the existing code style and component patterns
+2. Use TypeScript for all new code
+3. Maintain responsive design principles
+4. Test components thoroughly
+5. Update documentation for new features
 
-const doubledStore = new Derived({
-  fn: () => countStore.state * 2,
-  deps: [countStore],
-});
-doubledStore.mount();
+## Architecture Decisions
 
-function App() {
-  const count = useStore(countStore);
-  const doubledCount = useStore(doubledStore);
+- **File-based Routing**: TanStack Router for automatic route generation
+- **Component Composition**: Radix UI primitives for accessibility
+- **State Management**: Zustand for lightweight global state
+- **Styling**: Tailwind CSS for utility-first styling
+- **Type Safety**: Strict TypeScript configuration
 
-  return (
-    <div>
-      <button onClick={() => countStore.setState((n) => n + 1)}>
-        Increment - {count}
-      </button>
-      <div>Doubled - {doubledCount}</div>
-    </div>
-  );
-}
+## Performance Considerations
 
-export default App;
-```
+- **Code Splitting**: Automatic route-based code splitting
+- **Lazy Loading**: Dynamic imports for non-critical components
+- **Optimized Images**: Proper image sizing and formats
+- **Bundle Analysis**: Vite's built-in bundle analysis tools
 
-We use the `Derived` class to create a new store that is derived from another store. The `Derived` class has a `mount` method that will start the derived store updating.
+## Credits
 
-Once we've created the derived store we can use it in the `App` component just like we would any other store using the `useStore` hook.
-
-You can find out everything you need to know on how to use TanStack Store in the [TanStack Store documentation](https://tanstack.com/store/latest).
-
-# Demo files
-
-Files prefixed with `demo` can be safely deleted. They are there to provide a starting point for you to play around with the features you've installed.
-
-# Learn More
-
-You can learn more about all of the offerings from TanStack in the [TanStack documentation](https://tanstack.com).
+- **Created in collaboration with**: [HapLab](https://www.haplab.org/)
+- **UI Components**: [shadcn/ui](https://ui.shadcn.com/)
+- **Icons**: [Lucide React](https://lucide.dev/)
+- **Styling**: [Tailwind CSS](https://tailwindcss.com/)
