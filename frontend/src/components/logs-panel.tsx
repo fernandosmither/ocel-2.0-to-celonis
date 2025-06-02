@@ -4,10 +4,12 @@ import { useAppStore } from "@/lib/store";
 export default function LogsPanel() {
   const { logs, clearLogs } = useAppStore();
   const logsEndRef = useRef<HTMLDivElement>(null);
+  const logsContainerRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll to bottom when logs update
   useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (logs.length > 0 && logsContainerRef.current) {
+      logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight;
+    }
   }, [logs]);
 
   const getLevelColor = (level: string) => {
@@ -44,7 +46,10 @@ export default function LogsPanel() {
         </div>
       </div>
 
-      <div className="bg-black border border-gray-800 rounded-md h-80 overflow-y-auto font-mono text-sm p-4">
+      <div 
+        ref={logsContainerRef}
+        className="bg-black border border-gray-800 rounded-md h-80 overflow-y-auto font-mono text-sm p-4"
+      >
         {logs.length === 0 ? (
           <div className="text-gray-500 text-center py-8">
             No logs yet. Connect to backend to start seeing activity.
