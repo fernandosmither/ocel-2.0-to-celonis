@@ -182,14 +182,15 @@ async def websocket_endpoint(websocket: WebSocket):
 
 async def handle_start_login(websocket: WebSocket, session: dict, command_data: dict):
     """Handle start_login command."""
+    base_url = command_data.get("base_url")
     username = command_data.get("username")
     password = command_data.get("password")
 
-    if not username or not password:
+    if not base_url or not username or not password:
         await send_response(
             websocket,
             ServerResponse.ERROR,
-            {"message": "Username and password are required"},
+            {"message": "Base URL, username and password are required"},
         )
         return
 
@@ -199,7 +200,7 @@ async def handle_start_login(websocket: WebSocket, session: dict, command_data: 
 
         # Create log callback for this session's websocket
         log_callback = create_log_callback(websocket)
-        session["client"] = CelonisClient(username, password, log_callback)
+        session["client"] = CelonisClient(base_url, username, password, log_callback)
 
         response = await session["client"].login()
 

@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { Button } from '@/components/ui/button';
+import { useState, useEffect } from "react";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -7,8 +7,8 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '@/components/ui/dialog';
-import { useAppStore } from '@/lib/store';
+} from "@/components/ui/dialog";
+import { useAppStore } from "@/lib/store";
 
 interface LoginModalProps {
   open: boolean;
@@ -16,15 +16,15 @@ interface LoginModalProps {
 }
 
 export default function LoginModal({ open, onOpenChange }: LoginModalProps) {
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  
-  const { sendCommand, appState } = useAppStore();
+
+  const { sendCommand, appState, selectedBaseUrl } = useAppStore();
 
   // Close modal when login is successful or MFA is required
   useEffect(() => {
-    if (open && (appState === 'mfa_required' || appState === 'authenticated')) {
+    if (open && (appState === "mfa_required" || appState === "authenticated")) {
       setIsLoading(false);
       onOpenChange(false);
     }
@@ -32,25 +32,26 @@ export default function LoginModal({ open, onOpenChange }: LoginModalProps) {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    if (!username.trim() || !password.trim()) {
+
+    if (!username.trim() || !password.trim() || !selectedBaseUrl) {
       return;
     }
-    
+
     setIsLoading(true);
-    
+
     sendCommand({
-      command: 'start_login',
+      command: "start_login",
+      base_url: selectedBaseUrl,
       username: username.trim(),
       password: password.trim(),
     });
-    
+
     // Don't clear form or close modal here - let the useEffect handle it based on response
   };
 
   const handleCancel = () => {
-    setUsername('');
-    setPassword('');
+    setUsername("");
+    setPassword("");
     setIsLoading(false);
     onOpenChange(false);
   };
@@ -58,8 +59,8 @@ export default function LoginModal({ open, onOpenChange }: LoginModalProps) {
   // Clear form when modal closes
   useEffect(() => {
     if (!open) {
-      setUsername('');
-      setPassword('');
+      setUsername("");
+      setPassword("");
       setIsLoading(false);
     }
   }, [open]);
@@ -73,14 +74,19 @@ export default function LoginModal({ open, onOpenChange }: LoginModalProps) {
           </DialogTitle>
           <DialogDescription className="text-gray-400 font-mono text-sm">
             Enter your Celonis credentials to authenticate
+            {selectedBaseUrl && (
+              <div className="mt-2 text-xs text-cyan-400">
+                Alliance: {selectedBaseUrl}
+              </div>
+            )}
           </DialogDescription>
         </DialogHeader>
-        
+
         <form onSubmit={handleSubmit} className="space-y-6">
           <div className="space-y-4">
             <div>
-              <label 
-                htmlFor="username" 
+              <label
+                htmlFor="username"
                 className="block text-sm font-mono text-gray-300 mb-2"
               >
                 Username
@@ -96,10 +102,10 @@ export default function LoginModal({ open, onOpenChange }: LoginModalProps) {
                 autoComplete="username"
               />
             </div>
-            
+
             <div>
-              <label 
-                htmlFor="password" 
+              <label
+                htmlFor="password"
                 className="block text-sm font-mono text-gray-300 mb-2"
               >
                 Password
@@ -116,7 +122,7 @@ export default function LoginModal({ open, onOpenChange }: LoginModalProps) {
               />
             </div>
           </div>
-          
+
           <DialogFooter className="gap-2 sm:gap-0">
             <Button
               type="button"
@@ -129,14 +135,19 @@ export default function LoginModal({ open, onOpenChange }: LoginModalProps) {
             </Button>
             <Button
               type="submit"
-              disabled={isLoading || !username.trim() || !password.trim()}
+              disabled={
+                isLoading ||
+                !username.trim() ||
+                !password.trim() ||
+                !selectedBaseUrl
+              }
               className="bg-cyan-600 hover:bg-cyan-700 text-white font-mono"
             >
-              {isLoading ? 'Authenticating...' : 'Login'}
+              {isLoading ? "Authenticating..." : "Login"}
             </Button>
           </DialogFooter>
         </form>
       </DialogContent>
     </Dialog>
   );
-} 
+}

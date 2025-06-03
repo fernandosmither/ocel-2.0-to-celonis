@@ -17,10 +17,6 @@ logger = logging.getLogger(__name__)
 
 # Keeping hardcoded global constants as requested
 BASE_LOGIN_URL = "https://id.celonis.cloud"
-# BASE_URL = "https://academic-celonis-xwmk9z.eu-2.celonis.cloud"
-BASE_URL = "https://academic-lhidalgo1-uc-cl.eu-2.celonis.cloud"
-OBJ_ENDPOINT = f"{BASE_URL}/bl/api/v1/types/objects?environment=develop"
-EVT_ENDPOINT = f"{BASE_URL}/bl/api/v1/types/events?environment=develop"
 
 TYPE_MAP = {
     "string": "CT_UTF8_STRING",
@@ -50,6 +46,7 @@ class CelonisClient:
 
     def __init__(
         self,
+        base_url: str,
         username: str,
         password: str,
         log_callback: Optional[Callable[[str, str], Awaitable[None]]] = None,
@@ -57,6 +54,7 @@ class CelonisClient:
         """Initialize the Celonis client.
 
         Args:
+            base_url: Celonis academic alliance base URL (e.g., "https://academic-example.eu-2.celonis.cloud")
             username: Celonis username
             password: Celonis password
             log_callback: Optional async callback function for forwarding log messages.
@@ -64,9 +62,18 @@ class CelonisClient:
         """
         self.client = httpx.AsyncClient(follow_redirects=False, timeout=30.0)
         self.csrf_token = None
+        self.base_url = base_url.rstrip("/")  # Remove trailing slash if present
         self.username = username
         self.password = password
         self.log_callback = log_callback
+
+        # Construct endpoints using the provided base URL
+        self.obj_endpoint = (
+            f"{self.base_url}/bl/api/v1/types/objects?environment=develop"
+        )
+        self.evt_endpoint = (
+            f"{self.base_url}/bl/api/v1/types/events?environment=develop"
+        )
 
     async def _log_info(self, message: str):
         """Log an info message and forward via callback if available."""
@@ -177,13 +184,13 @@ class CelonisClient:
     async def get_celonis_cloud_token(self):
         """Get the Celonis Cloud tokens in the client session"""
 
-        await self.client.get(BASE_URL, follow_redirects=True)
+        await self.client.get(self.base_url, follow_redirects=True)
 
         for cookie in self.client.cookies.jar:
             logger.debug(f"Cookie: {cookie}")
 
         xsrf_token = (
-            self.client.cookies.get("XSRF-TOKEN", domain=BASE_URL.split("://")[-1])
+            self.client.cookies.get("XSRF-TOKEN", domain=self.base_url.split("://")[-1])
             or self.csrf_token
         )
 
@@ -215,7 +222,7 @@ class CelonisClient:
             return data
 
         except Exception as e:
-            logger.error(f"Failed to download from R2: {str(e)}")
+            await self._log_warning(f"Failed to download/parse jsonocel: {str(e)}")
             raise
 
     async def download_jsonocel(self, identifier: str) -> dict:
@@ -350,7 +357,7 @@ class CelonisClient:
             object_types: List of object type definitions
         """
         await self._create_types(
-            object_types, OBJ_ENDPOINT, require_time=False, include_color=True
+            object_types, self.obj_endpoint, require_time=False, include_color=True
         )
 
     async def create_event_types(self, event_types: list[dict]):
@@ -360,7 +367,7 @@ class CelonisClient:
             event_types: List of event type definitions
         """
         await self._create_types(
-            event_types, EVT_ENDPOINT, require_time=True, include_color=False
+            event_types, self.evt_endpoint, require_time=True, include_color=False
         )
 
     async def close(self):
@@ -373,10 +380,12 @@ async def main():
     """Main function to demonstrate usage of the CelonisClient."""
     username = os.getenv("CELONIS_USERNAME")
     password = os.getenv("CELONIS_PASSWORD")
+    base_url = os.getenv("CELONIS_BASE_URL")
     assert username is not None
     assert password is not None
+    assert base_url is not None
 
-    client = CelonisClient(username=username, password=password)
+    client = CelonisClient(base_url=base_url, username=username, password=password)
 
     try:
         response = await client.login()

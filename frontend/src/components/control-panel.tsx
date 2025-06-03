@@ -4,11 +4,13 @@ import { useAppStore } from "@/lib/store";
 import { uploadFile, UploadError } from "@/lib/upload";
 import LoginModal from "./login-modal";
 import MfaModal from "./mfa-modal";
+import UrlSelectionModal from "./url-selection-modal";
 import { Upload, Loader2 } from "lucide-react";
 
 export default function ControlPanel() {
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [showMfaModal, setShowMfaModal] = useState(false);
+  const [showUrlModal, setShowUrlModal] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const {
@@ -16,12 +18,14 @@ export default function ControlPanel() {
     connectionStatus,
     uploadedFileUuid,
     uploadProgress,
+    selectedBaseUrl,
     connect,
     disconnect,
     sendCommand,
     setUploadProgress,
     setUploading,
     setFileReady,
+    setSelectedBaseUrl,
     addLog,
   } = useAppStore();
 
@@ -94,9 +98,24 @@ export default function ControlPanel() {
         message: "Please upload a .jsonocel file first",
       });
       return;
+    } else if (!selectedBaseUrl) {
+      // If no URL selected, show URL selection modal
+      setShowUrlModal(true);
+      return;
     } else {
       setShowLoginModal(true);
     }
+  };
+
+  const handleUrlSelected = (url: string) => {
+    setSelectedBaseUrl(url);
+    setShowUrlModal(false);
+    addLog({
+      level: "success",
+      message: `Selected Celonis alliance: ${url}`,
+    });
+    // Automatically open login modal after URL selection
+    setShowLoginModal(true);
   };
 
   const handleDownloadAndCreateTypes = () => {
@@ -152,7 +171,7 @@ export default function ControlPanel() {
       case "login_required":
         actions.unshift({
           id: "start_login",
-          label: "START LOGIN",
+          label: selectedBaseUrl ? "START LOGIN" : "SELECT ALLIANCE & LOGIN",
           onClick: handleStartLogin,
           variant: "default" as const,
         });
@@ -276,6 +295,15 @@ export default function ControlPanel() {
           ))}
         </div>
 
+        {selectedBaseUrl && (
+          <div className="mt-4 p-3 bg-gray-800 border border-gray-700 rounded-md">
+            <p className="text-sm font-mono text-gray-300">
+              Selected Alliance:{" "}
+              <span className="text-cyan-400">{selectedBaseUrl}</span>
+            </p>
+          </div>
+        )}
+
         {uploadedFileUuid && (
           <div className="mt-4 p-3 bg-gray-800 border border-gray-700 rounded-md">
             <p className="text-sm font-mono text-gray-300">
@@ -296,6 +324,7 @@ export default function ControlPanel() {
       />
 
       {/* Modals */}
+      <UrlSelectionModal isOpen={showUrlModal} onUrlSelected={handleUrlSelected} />
       <LoginModal open={showLoginModal} onOpenChange={setShowLoginModal} />
       <MfaModal open={showMfaModal} onOpenChange={setShowMfaModal} />
     </>

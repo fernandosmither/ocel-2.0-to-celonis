@@ -21,6 +21,9 @@ interface AppStore {
   uploadedFileUuid: string | null;
   uploadProgress: number;
 
+  // Selected Celonis base URL
+  selectedBaseUrl: string | null;
+
   // Actions
   setAppState: (state: AppState) => void;
   addLog: (log: Omit<LogEntry, "timestamp">) => void;
@@ -35,6 +38,9 @@ interface AppStore {
   setUploadedFileUuid: (uuid: string | null) => void;
   setUploadProgress: (progress: number) => void;
 
+  // URL selection actions
+  setSelectedBaseUrl: (url: string | null) => void;
+
   // Upload state management
   setUploading: () => void;
   setFileReady: (uuid: string) => void;
@@ -48,6 +54,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   logs: [],
   uploadedFileUuid: null,
   uploadProgress: 0,
+  selectedBaseUrl: null,
 
   // Basic actions
   setAppState: (state) => set({ appState: state }),
@@ -70,6 +77,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   setUploadedFileUuid: (uuid) => set({ uploadedFileUuid: uuid }),
   setUploadProgress: (progress) => set({ uploadProgress: progress }),
+  setSelectedBaseUrl: (url) => set({ selectedBaseUrl: url }),
 
   // Upload state management
   setUploading: () => set({ appState: "uploading", uploadProgress: 0 }),

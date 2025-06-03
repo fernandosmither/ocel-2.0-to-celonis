@@ -36,7 +36,7 @@ pnpm install
 
 2. Start the development server:
 ```bash
-pnpm start
+pnpm start  
 ```
 
 The application will be available at `http://localhost:3000`

@@ -28,6 +28,7 @@ export interface ClientCommand {
     | "retry_login"
     | "retry_mfa"
     | "close";
+  base_url?: string;
   username?: string;
   password?: string;
   code?: string;
