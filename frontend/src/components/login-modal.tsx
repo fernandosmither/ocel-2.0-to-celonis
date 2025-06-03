@@ -20,7 +20,7 @@ export default function LoginModal({ open, onOpenChange }: LoginModalProps) {
   const [password, setPassword] = useState("");
   const [isLoading, setIsLoading] = useState(false);
 
-  const { sendCommand, appState, selectedBaseUrl } = useAppStore();
+  const { sendCommand, appState, selectedBaseUrl, loginError } = useAppStore();
 
   // Close modal when login is successful or MFA is required
   useEffect(() => {
@@ -29,6 +29,13 @@ export default function LoginModal({ open, onOpenChange }: LoginModalProps) {
       onOpenChange(false);
     }
   }, [appState, open, onOpenChange]);
+
+  // Handle login error - reset loading state but keep modal open
+  useEffect(() => {
+    if (open && loginError && isLoading) {
+      setIsLoading(false);
+    }
+  }, [loginError, open, isLoading]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -122,6 +129,17 @@ export default function LoginModal({ open, onOpenChange }: LoginModalProps) {
               />
             </div>
           </div>
+
+          {loginError && (
+            <div className="p-3 bg-red-900/50 border border-red-700 rounded-md">
+              <p className="text-sm font-mono text-red-200">
+                {loginError}
+              </p>
+              <p className="text-xs font-mono text-red-300 mt-1">
+                Please check your alliance, username, and password and try again.
+              </p>
+            </div>
+          )}
 
           <DialogFooter className="gap-2 sm:gap-0">
             <Button

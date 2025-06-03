@@ -24,6 +24,9 @@ interface AppStore {
   // Selected Celonis base URL
   selectedBaseUrl: string | null;
 
+  // Login error state
+  loginError: string | null;
+
   // Actions
   setAppState: (state: AppState) => void;
   addLog: (log: Omit<LogEntry, "timestamp">) => void;
@@ -44,6 +47,9 @@ interface AppStore {
   // Upload state management
   setUploading: () => void;
   setFileReady: (uuid: string) => void;
+
+  // Login error management
+  setLoginError: (error: string | null) => void;
 }
 
 export const useAppStore = create<AppStore>((set, get) => ({
@@ -55,6 +61,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   uploadedFileUuid: null,
   uploadProgress: 0,
   selectedBaseUrl: null,
+  loginError: null,
 
   // Basic actions
   setAppState: (state) => set({ appState: state }),
@@ -209,11 +216,16 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   sendCommand: (command) => {
-    const { websocket, addLog } = get();
+    const { websocket, addLog, setLoginError } = get();
 
     if (!websocket || websocket.readyState !== WebSocket.OPEN) {
       addLog({ level: "error", message: "Not connected to backend" });
       return;
+    }
+
+    // Clear login error when starting a new login attempt
+    if (command.command === "start_login") {
+      setLoginError(null);
     }
 
     try {
@@ -223,11 +235,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
       addLog({ level: "error", message: "Failed to send command" });
     }
   },
+
+  // Login error management
+  setLoginError: (error) => set({ loginError: error }),
 }));
 
 // Handle server responses
 function handleServerResponse(response: ServerResponse) {
-  const { addLog, setAppState, connectionStatus } = useAppStore.getState();
+  const { addLog, setAppState, connectionStatus, setLoginError } = useAppStore.getState();
 
   switch (response.type) {
     case "connected":
@@ -248,16 +263,19 @@ function handleServerResponse(response: ServerResponse) {
 
     case "login_success":
       setAppState("authenticated");
+      setLoginError(null);
       addLog({ level: "success", message: "Login successful" });
       break;
 
     case "login_failed":
       setAppState("login_required");
+      setLoginError(response.message || "Login failed. Please check your credentials and try again.");
       addLog({ level: "error", message: response.message || "Login failed" });
       break;
 
     case "mfa_required":
       setAppState("mfa_required");
+      setLoginError(null);
       addLog({ level: "info", message: "MFA authentication required" });
       break;
 
