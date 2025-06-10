@@ -18,9 +18,12 @@ async def test_websocket_client():
     """Test the WebSocket API with the new R2 upload flow."""
 
     # Step 0: Upload file to R2 (if user provides a file path)
-    file_path = input(
-        "Enter path to your .jsonocel file (or press Enter to skip upload): "
-    ).strip()
+    file_path = (
+        os.getenv("TEST_JSONOCEL_PATH")
+        or input(
+            "Enter path to your .jsonocel file (or press Enter to skip upload): "
+        ).strip()
+    )
 
     if file_path and os.path.exists(file_path):
         print(f"Uploading {file_path} to R2...")
@@ -92,8 +95,12 @@ async def test_websocket_client():
         # Step 2: Start login
         login_command = {
             "command": "start_login",
-            "username": input("Enter your Celonis username: "),
-            "password": input("Enter your Celonis password: "),
+            "username": os.getenv("TEST_CELONIS_USERNAME")
+            or input("Enter your Celonis username: "),
+            "password": os.getenv("TEST_CELONIS_PASSWORD")
+            or input("Enter your Celonis password: "),
+            "base_url": os.getenv("TEST_CELONIS_BASE_URL")
+            or input("Enter your Celonis base URL: "),
         }
 
         print("Sending login command...")
