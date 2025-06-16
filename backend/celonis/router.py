@@ -301,6 +301,8 @@ async def handle_download_and_create_types(
         if "eventTypes" in data:
             await client.create_event_types(data["eventTypes"])
 
+        await client.create_transformations(data)
+
         await send_response(websocket, ServerResponse.TYPES_CREATION_COMPLETE)
 
     except Exception as e:

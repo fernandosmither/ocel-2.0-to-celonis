@@ -8,6 +8,7 @@ import os
 from typing import Callable, Optional, Awaitable
 
 from cloudflare.client import R2Client
+from splitter.client import splitter
 
 load_dotenv()
 
@@ -58,9 +59,14 @@ class CelonisClient:
             username: Celonis username
             password: Celonis password
             log_callback: Optional async callback function for forwarding log messages.
-                         Should accept (level, message) where level is "info" or "warning"
+                        Should accept (level, message) where level is "info", "warning" or "error"
         """
-        self.client = httpx.AsyncClient(follow_redirects=False, timeout=30.0)
+        self.client = httpx.AsyncClient(
+            follow_redirects=False,
+            timeout=30.0,
+            # verify=False,
+            # proxy="http://localhost:8080",
+        )
         self.csrf_token = None
         self.base_url = base_url.rstrip("/")  # Remove trailing slash if present
         self.username = username
@@ -74,6 +80,8 @@ class CelonisClient:
         self.evt_endpoint = (
             f"{self.base_url}/bl/api/v1/types/events?environment=develop"
         )
+        self.factory_create_endpoint = f"{self.base_url}/bl/api/v1/factories/sql?environment=develop&useV2Manifest=true"
+        self.factory_update_endpoint_base = f"{self.base_url}/bl/api/v1/factories/sql"
 
     async def _log_info(self, message: str):
         """Log an info message and forward via callback if available."""
@@ -86,6 +94,12 @@ class CelonisClient:
         logger.warning(message)
         if self.log_callback:
             await self.log_callback("warning", message)
+
+    async def _log_error(self, message: str):
+        """Log an error message and forward via callback if available."""
+        logger.error(message)
+        if self.log_callback:
+            await self.log_callback("error", message)
 
     async def _get_csrf_token(self):
         """Initialize session and get CSRF token."""
@@ -197,6 +211,20 @@ class CelonisClient:
         if xsrf_token:
             self.client.headers.update({"X-Xsrf-Token": xsrf_token})
 
+        await self.get_session_and_pac4j_token()
+
+    async def get_session_and_pac4j_token(self):
+        """Get the session and pac4j token in the client session"""
+        url = f"{self.base_url}/api/public/authentication/status"
+        await self.client.get(url, follow_redirects=True)
+        url = f"{self.base_url}/api/auth-handler/commence?redirect=%2Fui%2F"
+        await self.client.get(url, follow_redirects=True)
+        xsrf_token = self.client.cookies.get(
+            "XSRF-TOKEN", domain=self.base_url.split("://")[-1]
+        )
+        if xsrf_token:
+            self.client.headers.update({"X-Xsrf-Token": xsrf_token})
+
     async def download_jsonocel_from_r2(self, file_uuid: str) -> dict:
         """Download and parse a jsonocel file from R2 using UUID.
 
@@ -216,7 +244,7 @@ class CelonisClient:
             file_content = await r2_client.download_file(file_uuid)
 
             await self._log_info("Download complete, parsing JSON...")
-            data = json.loads(file_content.decode("utf-8"))
+            data: dict = json.loads(file_content.decode("utf-8"))
 
             await self._log_info("Jsonocel file parsed successfully")
             return data
@@ -240,47 +268,53 @@ class CelonisClient:
         return await self.download_jsonocel_from_r2(identifier)
 
     async def _sanitize_name(self, raw: str) -> str:
-        """Sanitize a name to ensure it's valid for Celonis.
-
-        Args:
-            raw: The raw name string
-
-        Returns:
-            str: The sanitized name
         """
-        chars = []
-        # ensure starts with letter
-        if not raw or not raw[0].isalpha():
-            chars.append("A")
-            await self._log_warning(f"Name '{raw}' invalid start; prepending 'A'")
-        for c in raw:
-            if c.isalnum():
-                chars.append(c)
+        • Keep only [0-9a-zA-Z ].
+        • Capital-case each word.
+        • Remove all spaces.
+        • Guarantee the first character is a letter
+        (prepend "A" if the cleaned string starts with a digit or is empty).
+        """
+        if raw is None:
+            raw = ""
+
+        allowed = []
+        for ch in raw:
+            if ch.isalnum() or ch == " ":
+                allowed.append(ch)
             else:
-                await self._log_warning(f"Stripping invalid '{c}' from '{raw}'")
-        return "".join(chars)
+                await self._log_warning(f"Stripping invalid '{ch}' from '{raw}'")
+
+        cleaned = "".join(allowed)
+
+        cleaned = " ".join(word.capitalize() for word in cleaned.split())
+        cleaned = cleaned.replace(" ", "")  # remove remaining spaces
+
+        if not cleaned or not cleaned[0].isalpha():
+            await self._log_warning(f"Name '{raw}' invalid start; prepending 'A'")
+            cleaned = "A" + cleaned
+
+        return cleaned
 
     async def _sanitize_fields(self, fields: list[dict]) -> list[dict]:
-        """Sanitize field names in a list of field dictionaries.
-
-        Args:
-            fields: List of field dictionaries
-
-        Returns:
-            list[dict]: Sanitized fields
         """
-        out = []
-        for f in fields:
-            name = f["name"]
-            if not name or not name[0].isalpha():
-                name = "A" + name
-                await self._log_warning(f"Field name invalid start; became '{name}'")
-            cleaned = "".join(ch for ch in name if ch.isalnum())
-            if cleaned != name:
-                await self._log_warning(f"Sanitized field name '{name}' → '{cleaned}'")
-            f["name"] = cleaned
-            out.append(f)
-        return out
+        Uses the same rules as _sanitize_name to sanitize fields.
+        """
+        sanitized_fields: list[dict] = []
+
+        for field in fields:
+            original_name = field.get("name") or ""
+            new_name = await self._sanitize_name(original_name)
+
+            if new_name != original_name:
+                await self._log_warning(
+                    f"Sanitized field name '{original_name}' → '{new_name}'"
+                )
+
+            field["name"] = new_name
+            sanitized_fields.append(field)
+
+        return sanitized_fields
 
     async def _create_types(
         self,
@@ -308,6 +342,13 @@ class CelonisClient:
                 }
                 for a in it["attributes"]
             ]
+            id_time_fields = [f for f in fields if f["name"] in ["ID", "Time"]]
+            other_fields = [f for f in fields if f["name"] not in ["ID", "Time"]]
+
+            sanitized_fields = await self._sanitize_fields(other_fields)
+
+            fields = sanitized_fields + id_time_fields
+
             # ensure ID
             if not any(f["name"] == "ID" for f in fields):
                 fields.append(
@@ -318,7 +359,6 @@ class CelonisClient:
                 fields.append(
                     {"name": "Time", "namespace": "custom", "dataType": "CT_INSTANT"}
                 )
-            fields = await self._sanitize_fields(fields)
 
             payload = {
                 "name": name,
@@ -333,6 +373,7 @@ class CelonisClient:
 
             resp = await self.client.post(endpoint, json=payload)
             try:
+                logger.info(resp.json())
                 resp.raise_for_status()
                 await self._log_info(
                     f"✓ Created {endpoint.split('/')[-1][:-1]} type '{name}'"
@@ -368,6 +409,524 @@ class CelonisClient:
         """
         await self._create_types(
             event_types, self.evt_endpoint, require_time=True, include_color=False
+        )
+
+    async def _create_factory_transformation(
+        self,
+        type_name: str,
+        sql_chunks: list[str],
+        target_kind: str,
+        data_connection_id: str = "",
+    ):
+        """Create factory transformations for a single type (object or event).
+
+        Args:
+            type_name: Name of the object/event type
+            sql_chunks: List of SQL chunks for this type
+            target_kind: "OBJECT" or "EVENT"
+            data_connection_id: Data connection ID (empty for objects, UUID for events)
+        """
+        await self._log_info(
+            f"Processing {target_kind.lower()} type '{type_name}' with {len(sql_chunks)} chunks"
+        )
+
+        for chunk_idx, sql_chunk in enumerate(sql_chunks, 1):
+            await self._log_info(
+                f"Processing chunk {chunk_idx}/{len(sql_chunks)} for '{type_name}'"
+            )
+
+            try:
+                create_payload = {
+                    "factoryId": "00000000-0000-0000-0000-000000000000",
+                    "namespace": "custom",
+                    "changeDate": 0,
+                    "creationDate": 0,
+                    "dataConnectionId": data_connection_id,
+                    "displayName": type_name,
+                    "target": {
+                        "entityRef": {"name": type_name, "namespace": "custom"},
+                        "kind": target_kind,
+                    },
+                    "draft": True,
+                    "localParameters": [],
+                    "changedBy": {},
+                    "createdBy": {},
+                }
+
+                create_response = await self.client.post(
+                    self.factory_create_endpoint, json=create_payload
+                )
+                create_response.raise_for_status()
+
+                factory_data = create_response.json()
+                factory_id = factory_data["factoryId"]
+
+                await self._log_info(
+                    f"✓ Created factory {factory_id} for '{type_name}' chunk {chunk_idx}"
+                )
+
+                update_endpoint = f"{self.factory_update_endpoint_base}/{factory_id}?environment=develop&useV2Manifest=true"
+
+                property_names = ["ID"]
+                if target_kind == "EVENT":
+                    property_names.append("Time")
+                    import re
+
+                    column_matches = re.findall(
+                        r'AS\s+"([^"]+)"', sql_chunk, re.IGNORECASE
+                    )
+                    if column_matches:
+                        # Remove duplicates while preserving order, skip ID and Time as they're already added
+                        seen = {"ID", "Time"}
+                        for col in column_matches:
+                            if col not in seen:
+                                property_names.append(col)
+                                seen.add(col)
+
+                update_payload = factory_data.copy()
+                update_payload.update(
+                    {
+                        "transformations": [
+                            {
+                                "namespace": "custom",
+                                "foreignKeyNames": [],
+                                "propertyNames": property_names,
+                                "propertySqlFactoryDatasets": [
+                                    {
+                                        "id": f"{type_name}Attributes",
+                                        "disabled": False,
+                                        "sql": sql_chunk,
+                                        "overwrite": None,
+                                        "materialiseCte": False,
+                                        "type": "SQL_FACTORY_DATA_SET",
+                                        "completeOverwrite": False,
+                                    }
+                                ],
+                                "changeSqlFactoryDatasets": [],
+                                "relationshipTransformations": [],
+                            }
+                        ],
+                        "draft": False,
+                        "saveMode": "VALIDATE",
+                        "disabled": True,
+                    }
+                )
+
+                update_response = await self.client.put(
+                    update_endpoint, json=update_payload
+                )
+                update_response.raise_for_status()
+
+                await self._log_info(
+                    f"✓ Successfully updated factory with SQL for '{type_name}' chunk {chunk_idx}"
+                )
+
+            except httpx.HTTPStatusError as e:
+                if "update_response" in locals() and update_response.status_code == 400:
+                    try:
+                        error_body = update_response.json()
+                        if error_body.get("statusCode") == 400:
+                            error_message = error_body.get(
+                                "message", "Unknown update error"
+                            )
+                            await self._log_error(
+                                f"Update error for '{type_name}' chunk {chunk_idx}: {error_message}"
+                            )
+                            continue
+                    except (json.JSONDecodeError, KeyError):
+                        pass
+
+                import traceback
+
+                traceback.print_exc()
+                raise e
+
+    async def create_transformations(self, data: dict):
+        """Create both object and event transformations in Celonis using the splitter.
+
+        Args:
+            data: OCEL object data to be split and processed
+        """
+        await self._log_info("Starting transformations creation process...")
+
+        try:
+            objects_sql, events_sql, relationships_sql, object_relationships_sql = (
+                splitter.split(data)
+            )
+        except Exception as e:
+            await self._log_error(f"Error splitting data: {str(e)}")
+            import traceback
+
+            traceback.print_exc()
+            raise
+
+        total_types = len(objects_sql) + len(events_sql)
+        await self._log_info(
+            f"Split data into {len(objects_sql)} object types and {len(events_sql)} event types. "
+            f"There are {len(relationships_sql)} event-object relationships to process."
+        )
+
+        for object_type_name, sql_chunks in objects_sql.items():
+            await self._create_factory_transformation(
+                object_type_name,
+                sql_chunks,
+                "OBJECT",
+                "",  # Empty data connection ID for objects
+            )
+
+        for event_type_name, sql_chunks in events_sql.items():
+            await self._create_factory_transformation(
+                event_type_name,
+                sql_chunks,
+                "EVENT",
+                "00000000-0000-0000-0000-000000000000",  # UUID for events
+            )
+
+        await self._log_info(f"✓ Completed transformations for all {total_types} types")
+
+        await self._create_event_object_relationships(relationships_sql)
+
+        await self._log_info("✓ Completed relationships")
+
+    async def _fetch_all_events(self) -> list[dict]:
+        """Fetch all events from Celonis API with pagination.
+
+        Returns:
+            list[dict]: List of all events
+        """
+        all_events = []
+        page_number = 0
+
+        while True:
+            endpoint = f"{self.base_url}/bl/api/v1/types/events?requestMode=ALL&environment=develop&pageNumber={page_number}"
+
+            try:
+                response = await self.client.get(endpoint)
+                response.raise_for_status()
+
+                data = response.json()
+                events = data.get("content", [])
+                all_events.extend(events)
+
+                await self._log_info(
+                    f"Fetched page {page_number + 1} with {len(events)} events"
+                )
+
+                if data.get("last", True):
+                    break
+
+                page_number += 1
+
+            except Exception as e:
+                await self._log_error(
+                    f"Error fetching events page {page_number}: {str(e)}"
+                )
+                raise
+
+        await self._log_info(f"Fetched total of {len(all_events)} events")
+        return all_events
+
+    async def _add_relationship_to_event(
+        self, event: dict, obj_names: list[str], evt_name: str
+    ) -> list[str]:
+        """Add 1:n relationships to an event and update it via API.
+
+        Args:
+            event: The event object from Celonis API
+            obj_names: List of object names to create relationships with
+            evt_name: Original event name for logging
+
+        Returns:
+            List of object names for which new relationships were added
+        """
+        updated_event = event.copy()
+
+        for attr in [
+            "creationDate",
+            "createdBy",
+            "changedBy",
+            "id",
+            "namespace",
+        ]:
+            updated_event.pop(attr, None)
+
+        if "relationships" not in updated_event:
+            updated_event["relationships"] = []
+
+        new_relationships_added = []
+        for obj_name in obj_names:
+            relationship_exists = any(
+                rel.get("name") == obj_name
+                and rel.get("target", {}).get("objectRef", {}).get("name") == obj_name
+                for rel in updated_event["relationships"]
+            )
+
+            if not relationship_exists:
+                new_relationship = {
+                    "cardinality": "HAS_MANY",
+                    "name": obj_name,
+                    "namespace": "custom",
+                    "target": {
+                        "mappedBy": None,
+                        "mappedByNamespace": None,
+                        "objectRef": {"name": obj_name, "namespace": "custom"},
+                    },
+                }
+                updated_event["relationships"].append(new_relationship)
+                new_relationships_added.append(obj_name)
+            else:
+                await self._log_info(
+                    f"Relationship {evt_name} -> {obj_name} already exists, skipping"
+                )
+
+        if new_relationships_added:
+            event_id = event["id"]
+            update_endpoint = (
+                f"{self.base_url}/bl/api/v1/types/events/{event_id}?environment=develop"
+            )
+
+            response = await self.client.put(update_endpoint, json=updated_event)
+            response.raise_for_status()
+
+            relationships_str = ", ".join(new_relationships_added)
+            await self._log_info(
+                f"✓ Added 1:N relationships for {evt_name} -> [{relationships_str}]"
+            )
+        else:
+            await self._log_info(f"No new relationships to add for event {evt_name}")
+
+        return new_relationships_added
+
+    async def _create_relationship_factory_and_transformations(
+        self, evt_name: str, event_obj_sql_map: dict[str, list[str]]
+    ):
+        """Create factory and transformations for event-object relationships.
+
+        Args:
+            evt_name: Event name
+            event_obj_sql_map: Dictionary mapping object names to their SQL chunks
+        """
+        try:
+            await self._log_info(
+                f"Creating factory for event '{evt_name}' relationships"
+            )
+
+            create_payload = {
+                "factoryId": "00000000-0000-0000-0000-000000000000",
+                "namespace": "custom",
+                "changeDate": 0,
+                "creationDate": 0,
+                "dataConnectionId": "00000000-0000-0000-0000-000000000000",
+                "displayName": evt_name,
+                "target": {
+                    "entityRef": {"name": evt_name, "namespace": "custom"},
+                    "kind": "EVENT",
+                },
+                "draft": True,
+                "localParameters": [],
+                "changedBy": {},
+                "createdBy": {},
+            }
+
+            create_response = await self.client.post(
+                self.factory_create_endpoint, json=create_payload
+            )
+            create_response.raise_for_status()
+
+            factory_data = create_response.json()
+            factory_id = factory_data["factoryId"]
+
+            await self._log_info(
+                f"✓ Created relationship factory {factory_id} for '{evt_name}'"
+            )
+
+            relationship_transformations = []
+
+            existing_transformations = factory_data.get("transformations", [{}])[0].get(
+                "relationshipTransformations", []
+            )
+
+            for rel_transform in existing_transformations:
+                relationship_name = rel_transform.get("relationshipName")
+                if relationship_name in event_obj_sql_map:
+                    sql_chunks = event_obj_sql_map[relationship_name]
+                    sql_factory_datasets = []
+
+                    for chunk_idx, sql_chunk in enumerate(sql_chunks, 1):
+                        chunk_id = f"{relationship_name.lower()}{chunk_idx}"
+                        sql_factory_datasets.append(
+                            {
+                                "id": chunk_id,
+                                "disabled": False,
+                                "sql": sql_chunk,
+                                "overwrite": None,
+                                "materialiseCte": False,
+                                "type": "SQL_FACTORY_DATA_SET",
+                                "completeOverwrite": False,
+                            }
+                        )
+
+                    relationship_transformations.append(
+                        {
+                            "relationshipName": relationship_name,
+                            "sqlFactoryDatasets": sql_factory_datasets,
+                        }
+                    )
+
+                    await self._log_info(
+                        f"✓ Added {len(sql_chunks)} SQL chunks for {evt_name} -> {relationship_name}"
+                    )
+                else:
+                    relationship_transformations.append(
+                        {
+                            "relationshipName": relationship_name,
+                            "sqlFactoryDatasets": [],
+                        }
+                    )
+
+            update_endpoint = f"{self.factory_update_endpoint_base}/{factory_id}?environment=develop&useV2Manifest=true"
+
+            update_payload = factory_data.copy()
+            update_payload.update(
+                {
+                    "transformations": [
+                        {
+                            "namespace": "custom",
+                            "foreignKeyNames": [],
+                            "propertyNames": ["ID", "Time"],
+                            "propertySqlFactoryDatasets": [],
+                            "changeSqlFactoryDatasets": [],
+                            "relationshipTransformations": relationship_transformations,
+                        }
+                    ],
+                    "draft": False,
+                    "saveMode": "VALIDATE",
+                    "disabled": True,
+                    "factoryValidationStatus": "NOT_VALIDATED",
+                }
+            )
+
+            update_response = await self.client.put(
+                update_endpoint, json=update_payload
+            )
+            update_response.raise_for_status()
+
+            factory_validation_status = update_response.json()[
+                "factoryValidationStatus"
+            ]
+            if factory_validation_status == "VALID":
+                await self._log_info(
+                    f"✓ Successfully created transformations for event '{evt_name}'"
+                )
+            else:
+                await self._log_error(
+                    f"Error creating transformations for event '{evt_name}': {factory_validation_status}"
+                )
+
+        except Exception as e:
+            await self._log_error(
+                f"Error creating factory/transformations for event {evt_name}: {str(e)}"
+            )
+            import traceback
+
+            traceback.print_exc()
+
+    async def _create_event_object_relationships(
+        self, relationships_sql: dict[str, list[str]]
+    ):
+        """Create 1:n relationships between events and objects, and their transformations.
+
+        Args:
+            relationships_sql: Dictionary with keys formatted as "{evt_name}_{obj_name}_relations"
+                             and values as lists of SQL chunks
+        """
+        if not relationships_sql:
+            await self._log_info("No relationships to process")
+            return
+
+        await self._log_info(
+            f"Processing {len(relationships_sql)} event-object relationships and transformations"
+        )
+
+        all_events = await self._fetch_all_events()
+
+        event_lookup = {}
+        for event in all_events:
+            event_name = event.get("name", "").lower()
+            event_lookup[event_name] = event
+
+        event_relationships = {}
+
+        for relationship_key, sql_chunks in relationships_sql.items():
+            try:
+                # Parse the key: "{evt_name}_{obj_name}_relations"
+                if not relationship_key.endswith("_relations"):
+                    await self._log_error(
+                        f"Invalid relationship key format: {relationship_key}"
+                    )
+                    continue
+
+                name_part = relationship_key[:-10]  # Remove "_relations"
+                parts = name_part.rsplit("_", 1)
+
+                if len(parts) != 2:
+                    await self._log_error(
+                        f"Could not parse event and object names from: {relationship_key}"
+                    )
+                    continue
+
+                evt_name, obj_name = parts
+
+                evt_key = evt_name.lower()
+                if evt_key not in event_relationships:
+                    event_relationships[evt_key] = {
+                        "original_evt_name": evt_name,
+                        "objects": [],
+                        "obj_sql_map": {},
+                    }
+                event_relationships[evt_key]["objects"].append(obj_name)
+                event_relationships[evt_key]["obj_sql_map"][obj_name] = sql_chunks
+
+            except Exception as e:
+                await self._log_error(
+                    f"Error parsing relationship {relationship_key}: {str(e)}"
+                )
+                continue
+
+        for evt_key, rel_data in event_relationships.items():
+            try:
+                evt_name = rel_data["original_evt_name"]
+                obj_names = rel_data["objects"]
+                obj_sql_map = rel_data["obj_sql_map"]
+
+                event = event_lookup.get(evt_key)
+                if not event:
+                    await self._log_error(f"Event '{evt_name}' not found")
+                    continue
+
+                new_relationships_added = await self._add_relationship_to_event(
+                    event, obj_names, evt_name
+                )
+
+                if new_relationships_added:
+                    new_obj_sql_map = {
+                        obj: obj_sql_map[obj] for obj in new_relationships_added
+                    }
+                    await self._create_relationship_factory_and_transformations(
+                        evt_name, new_obj_sql_map
+                    )
+
+            except Exception as e:
+                await self._log_error(
+                    f"Error processing relationships for event {evt_name}: {str(e)}"
+                )
+                import traceback
+
+                traceback.print_exc()
+                continue
+
+        await self._log_info(
+            "✓ Completed processing all event-object relationships and transformations"
         )
 
     async def close(self):
@@ -406,6 +965,7 @@ async def main():
 
         await client.create_object_types(data["objectTypes"])
         await client.create_event_types(data["eventTypes"])
+        await client.create_transformations(data)
 
     finally:
         await client.close()
