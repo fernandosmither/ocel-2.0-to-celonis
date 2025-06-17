@@ -63,7 +63,7 @@ class CelonisClient:
         """
         self.client = httpx.AsyncClient(
             follow_redirects=False,
-            timeout=30.0,
+            timeout=60.0,
             # verify=False,
             # proxy="http://localhost:8080",
         )
@@ -371,7 +371,7 @@ class CelonisClient:
             if include_color:
                 payload["color"] = "#4608B3"
 
-            resp = await self.client.post(endpoint, json=payload)
+            resp = await self.client.post(endpoint, json=payload, timeout=300)
             try:
                 logger.info(resp.json())
                 resp.raise_for_status()
@@ -411,11 +411,172 @@ class CelonisClient:
             event_types, self.evt_endpoint, require_time=True, include_color=False
         )
 
+    async def _process_single_sql_chunk(
+        self,
+        type_name: str,
+        sql_chunk: str,
+        chunk_idx: int,
+        total_chunks: int,
+        target_kind: str,
+        data_connection_id: str,
+    ):
+        """Process a single SQL chunk by creating and updating a factory.
+
+        Args:
+            type_name: Name of the object/event type
+            sql_chunk: SQL chunk to process
+            chunk_idx: Index of this chunk (1-based)
+            total_chunks: Total number of chunks
+            target_kind: "OBJECT" or "EVENT"
+            data_connection_id: Data connection ID (empty for objects, UUID for events)
+        """
+        await self._log_info(
+            f"Processing chunk {chunk_idx}/{total_chunks} for '{type_name}'"
+        )
+
+        try:
+            create_payload = {
+                "factoryId": "00000000-0000-0000-0000-000000000000",
+                "namespace": "custom",
+                "changeDate": 0,
+                "creationDate": 0,
+                "dataConnectionId": data_connection_id,
+                "displayName": f"{type_name} - {chunk_idx}",
+                "target": {
+                    "entityRef": {"name": type_name, "namespace": "custom"},
+                    "kind": target_kind,
+                },
+                "draft": True,
+                "localParameters": [],
+                "changedBy": {},
+                "createdBy": {},
+            }
+
+            create_response = await self.client.post(
+                self.factory_create_endpoint,
+                json=create_payload,
+                timeout=300,
+            )
+            create_response.raise_for_status()
+
+            factory_data = create_response.json()
+            factory_id = factory_data["factoryId"]
+
+            await self._log_info(
+                f"✓ Created factory {factory_id} for '{type_name}' chunk {chunk_idx}"
+            )
+
+            update_endpoint = f"{self.factory_update_endpoint_base}/{factory_id}?environment=develop&useV2Manifest=true"
+
+            property_names = ["ID"]
+            if target_kind == "EVENT":
+                property_names.append("Time")
+                import re
+
+                column_matches = re.findall(r'AS\s+"([^"]+)"', sql_chunk, re.IGNORECASE)
+                if column_matches:
+                    # Remove duplicates while preserving order, skip ID and Time as they're already added
+                    seen = {"ID", "Time"}
+                    for col in column_matches:
+                        if col not in seen:
+                            property_names.append(col)
+                            seen.add(col)
+
+            update_payload = factory_data.copy()
+            update_payload.update(
+                {
+                    "transformations": [
+                        {
+                            "namespace": "custom",
+                            "foreignKeyNames": [],
+                            "propertyNames": property_names,
+                            "propertySqlFactoryDatasets": [
+                                {
+                                    "id": f"{type_name}Attributes",
+                                    "disabled": False,
+                                    "sql": sql_chunk,
+                                    "overwrite": None,
+                                    "materialiseCte": False,
+                                    "type": "SQL_FACTORY_DATA_SET",
+                                    "completeOverwrite": False,
+                                }
+                            ],
+                            "changeSqlFactoryDatasets": [],
+                            "relationshipTransformations": [],
+                        }
+                    ],
+                    "draft": False,
+                    "saveMode": "VALIDATE",
+                    "disabled": True,
+                }
+            )
+
+            update_response = await self.client.put(
+                update_endpoint, json=update_payload, timeout=300
+            )
+            update_response.raise_for_status()
+
+            await self._log_info(
+                f"✓ Successfully updated factory with SQL for '{type_name}' chunk {chunk_idx}"
+            )
+
+        except httpx.HTTPStatusError as e:
+            if "update_response" in locals() and update_response.status_code == 400:
+                try:
+                    error_body = update_response.json()
+                    if error_body.get("statusCode") == 400:
+                        error_message = error_body.get(
+                            "message", "Unknown update error"
+                        )
+                        await self._log_error(
+                            f"Update error for '{type_name}' chunk {chunk_idx}: {error_message}"
+                        )
+                        return
+                except (json.JSONDecodeError, KeyError):
+                    pass
+
+            import traceback
+
+            traceback.print_exc()
+            raise e
+
+    async def _process_single_sql_chunk_with_semaphore(
+        self,
+        semaphore: asyncio.Semaphore,
+        type_name: str,
+        sql_chunk: str,
+        chunk_idx: int,
+        total_chunks: int,
+        target_kind: str,
+        data_connection_id: str,
+    ):
+        """Process a single SQL chunk with semaphore to limit concurrency.
+
+        Args:
+            semaphore: Semaphore to limit concurrent operations
+            type_name: Name of the object/event type
+            sql_chunk: SQL chunk to process
+            chunk_idx: Index of this chunk (1-based)
+            total_chunks: Total number of chunks
+            target_kind: "OBJECT" or "EVENT"
+            data_connection_id: Data connection ID (empty for objects, UUID for events)
+        """
+        async with semaphore:
+            await self._process_single_sql_chunk(
+                type_name,
+                sql_chunk,
+                chunk_idx,
+                total_chunks,
+                target_kind,
+                data_connection_id,
+            )
+
     async def _create_factory_transformation(
         self,
         type_name: str,
         sql_chunks: list[str],
         target_kind: str,
+        semaphore: asyncio.Semaphore,
         data_connection_id: str = "",
     ):
         """Create factory transformations for a single type (object or event).
@@ -426,120 +587,46 @@ class CelonisClient:
             target_kind: "OBJECT" or "EVENT"
             data_connection_id: Data connection ID (empty for objects, UUID for events)
         """
+
         await self._log_info(
-            f"Processing {target_kind.lower()} type '{type_name}' with {len(sql_chunks)} chunks"
+            f"Processing {target_kind.lower()} type '{type_name}' with {len(sql_chunks)} chunks in parallel"
         )
 
+        # Create tasks for all SQL chunks with semaphore
+        chunk_tasks = []
         for chunk_idx, sql_chunk in enumerate(sql_chunks, 1):
-            await self._log_info(
-                f"Processing chunk {chunk_idx}/{len(sql_chunks)} for '{type_name}'"
+            task = self._process_single_sql_chunk_with_semaphore(
+                semaphore,
+                type_name,
+                sql_chunk,
+                chunk_idx,
+                len(sql_chunks),
+                target_kind,
+                data_connection_id,
             )
+            chunk_tasks.append(task)
 
-            try:
-                create_payload = {
-                    "factoryId": "00000000-0000-0000-0000-000000000000",
-                    "namespace": "custom",
-                    "changeDate": 0,
-                    "creationDate": 0,
-                    "dataConnectionId": data_connection_id,
-                    "displayName": type_name,
-                    "target": {
-                        "entityRef": {"name": type_name, "namespace": "custom"},
-                        "kind": target_kind,
-                    },
-                    "draft": True,
-                    "localParameters": [],
-                    "changedBy": {},
-                    "createdBy": {},
-                }
+        # Run all chunks with limited concurrency
+        if chunk_tasks:
+            chunk_results = await asyncio.gather(*chunk_tasks, return_exceptions=True)
 
-                create_response = await self.client.post(
-                    self.factory_create_endpoint, json=create_payload
-                )
-                create_response.raise_for_status()
-
-                factory_data = create_response.json()
-                factory_id = factory_data["factoryId"]
-
-                await self._log_info(
-                    f"✓ Created factory {factory_id} for '{type_name}' chunk {chunk_idx}"
-                )
-
-                update_endpoint = f"{self.factory_update_endpoint_base}/{factory_id}?environment=develop&useV2Manifest=true"
-
-                property_names = ["ID"]
-                if target_kind == "EVENT":
-                    property_names.append("Time")
-                    import re
-
-                    column_matches = re.findall(
-                        r'AS\s+"([^"]+)"', sql_chunk, re.IGNORECASE
+            # Check for and log any failures
+            failed_chunks = []
+            for i, result in enumerate(chunk_results):
+                if isinstance(result, Exception):
+                    failed_chunks.append(i + 1)  # 1-based chunk index
+                    await self._log_error(
+                        f"Chunk {i + 1} failed for '{type_name}': {str(result)}"
                     )
-                    if column_matches:
-                        # Remove duplicates while preserving order, skip ID and Time as they're already added
-                        seen = {"ID", "Time"}
-                        for col in column_matches:
-                            if col not in seen:
-                                property_names.append(col)
-                                seen.add(col)
 
-                update_payload = factory_data.copy()
-                update_payload.update(
-                    {
-                        "transformations": [
-                            {
-                                "namespace": "custom",
-                                "foreignKeyNames": [],
-                                "propertyNames": property_names,
-                                "propertySqlFactoryDatasets": [
-                                    {
-                                        "id": f"{type_name}Attributes",
-                                        "disabled": False,
-                                        "sql": sql_chunk,
-                                        "overwrite": None,
-                                        "materialiseCte": False,
-                                        "type": "SQL_FACTORY_DATA_SET",
-                                        "completeOverwrite": False,
-                                    }
-                                ],
-                                "changeSqlFactoryDatasets": [],
-                                "relationshipTransformations": [],
-                            }
-                        ],
-                        "draft": False,
-                        "saveMode": "VALIDATE",
-                        "disabled": True,
-                    }
+            if failed_chunks:
+                await self._log_error(
+                    f"Failed chunks for '{type_name}': {failed_chunks}"
                 )
-
-                update_response = await self.client.put(
-                    update_endpoint, json=update_payload
-                )
-                update_response.raise_for_status()
-
+            else:
                 await self._log_info(
-                    f"✓ Successfully updated factory with SQL for '{type_name}' chunk {chunk_idx}"
+                    f"✓ Successfully processed all {len(sql_chunks)} chunks for '{type_name}'"
                 )
-
-            except httpx.HTTPStatusError as e:
-                if "update_response" in locals() and update_response.status_code == 400:
-                    try:
-                        error_body = update_response.json()
-                        if error_body.get("statusCode") == 400:
-                            error_message = error_body.get(
-                                "message", "Unknown update error"
-                            )
-                            await self._log_error(
-                                f"Update error for '{type_name}' chunk {chunk_idx}: {error_message}"
-                            )
-                            continue
-                    except (json.JSONDecodeError, KeyError):
-                        pass
-
-                import traceback
-
-                traceback.print_exc()
-                raise e
 
     async def create_transformations(self, data: dict):
         """Create both object and event transformations in Celonis using the splitter.
@@ -566,25 +653,72 @@ class CelonisClient:
             f"There are {len(relationships_sql)} event-object relationships to process."
         )
 
+        max_concurrent_chunks = 8  # Limit to 8 parallel chunk operations
+        semaphore = asyncio.Semaphore(max_concurrent_chunks)
+
+        # Create all object transformation tasks
+        object_tasks = []
         for object_type_name, sql_chunks in objects_sql.items():
-            await self._create_factory_transformation(
+            task = self._create_factory_transformation(
                 object_type_name,
                 sql_chunks,
                 "OBJECT",
+                semaphore,
                 "",  # Empty data connection ID for objects
             )
+            object_tasks.append(task)
 
+        # Create all event transformation tasks
+        event_tasks = []
         for event_type_name, sql_chunks in events_sql.items():
-            await self._create_factory_transformation(
+            task = self._create_factory_transformation(
                 event_type_name,
                 sql_chunks,
                 "EVENT",
+                semaphore,
                 "00000000-0000-0000-0000-000000000000",  # UUID for events
             )
+            event_tasks.append(task)
+        #! DEBUGGING BYPASS
+        object_tasks = []
+        # Run all object transformations in parallel
+        if object_tasks:
+            await self._log_info(
+                f"Running {len(object_tasks)} object transformations in parallel..."
+            )
+            object_results = await asyncio.gather(*object_tasks, return_exceptions=True)
+
+            # Check for and log any failures
+            for i, result in enumerate(object_results):
+                if isinstance(result, Exception):
+                    object_name = list(objects_sql.keys())[
+                        i
+                    ]  # Get the object name for the failed task
+                    await self._log_error(
+                        f"Object transformation failed for '{object_name}': {str(result)}"
+                    )
+        #! DEBUGGING BYPASS
+        event_tasks = []
+        # Run all event transformations in parallel
+        if event_tasks:
+            await self._log_info(
+                f"Running {len(event_tasks)} event transformations in parallel..."
+            )
+            event_results = await asyncio.gather(*event_tasks, return_exceptions=True)
+
+            # Check for and log any failures
+            for i, result in enumerate(event_results):
+                if isinstance(result, Exception):
+                    event_name = list(events_sql.keys())[
+                        i
+                    ]  # Get the event name for the failed task
+                    await self._log_error(
+                        f"Event transformation failed for '{event_name}': {str(result)}"
+                    )
 
         await self._log_info(f"✓ Completed transformations for all {total_types} types")
 
-        await self._create_event_object_relationships(relationships_sql)
+        await self._create_event_object_relationships(relationships_sql, semaphore)
 
         await self._log_info("✓ Completed relationships")
 
@@ -685,7 +819,9 @@ class CelonisClient:
                 f"{self.base_url}/bl/api/v1/types/events/{event_id}?environment=develop"
             )
 
-            response = await self.client.put(update_endpoint, json=updated_event)
+            response = await self.client.put(
+                update_endpoint, json=updated_event, timeout=300
+            )
             response.raise_for_status()
 
             relationships_str = ", ".join(new_relationships_added)
@@ -696,6 +832,52 @@ class CelonisClient:
             await self._log_info(f"No new relationships to add for event {evt_name}")
 
         return new_relationships_added
+
+    async def _process_single_event_relationships_with_semaphore(
+        self,
+        semaphore: asyncio.Semaphore,
+        evt_key: str,
+        rel_data: dict,
+        event_lookup: dict,
+    ):
+        """Process relationships for a single event with semaphore to limit concurrency.
+
+        Args:
+            semaphore: Semaphore to limit concurrent operations
+            evt_key: Event key (lowercase)
+            rel_data: Relationship data for this event
+            event_lookup: Lookup dictionary for events
+        """
+        async with semaphore:
+            try:
+                evt_name = rel_data["original_evt_name"]
+                obj_names = rel_data["objects"]
+                obj_sql_map = rel_data["obj_sql_map"]
+
+                event = event_lookup.get(evt_key)
+                if not event:
+                    await self._log_error(f"Event '{evt_name}' not found")
+                    return
+
+                new_relationships_added = await self._add_relationship_to_event(
+                    event, obj_names, evt_name
+                )
+
+                if new_relationships_added:
+                    new_obj_sql_map = {
+                        obj: obj_sql_map[obj] for obj in new_relationships_added
+                    }
+                    await self._create_relationship_factory_and_transformations(
+                        evt_name, new_obj_sql_map
+                    )
+
+            except Exception as e:
+                await self._log_error(
+                    f"Error processing relationships for event {evt_name}: {str(e)}"
+                )
+                import traceback
+
+                traceback.print_exc()
 
     async def _create_relationship_factory_and_transformations(
         self, evt_name: str, event_obj_sql_map: dict[str, list[str]]
@@ -729,7 +911,9 @@ class CelonisClient:
             }
 
             create_response = await self.client.post(
-                self.factory_create_endpoint, json=create_payload
+                self.factory_create_endpoint,
+                json=create_payload,
+                timeout=300,
             )
             create_response.raise_for_status()
 
@@ -807,7 +991,7 @@ class CelonisClient:
             )
 
             update_response = await self.client.put(
-                update_endpoint, json=update_payload
+                update_endpoint, json=update_payload, timeout=300
             )
             update_response.raise_for_status()
 
@@ -832,20 +1016,21 @@ class CelonisClient:
             traceback.print_exc()
 
     async def _create_event_object_relationships(
-        self, relationships_sql: dict[str, list[str]]
+        self, relationships_sql: dict[str, list[str]], semaphore: asyncio.Semaphore
     ):
         """Create 1:n relationships between events and objects, and their transformations.
 
         Args:
             relationships_sql: Dictionary with keys formatted as "{evt_name}_{obj_name}_relations"
                              and values as lists of SQL chunks
+            semaphore: Semaphore to limit concurrent operations
         """
         if not relationships_sql:
             await self._log_info("No relationships to process")
             return
 
         await self._log_info(
-            f"Processing {len(relationships_sql)} event-object relationships and transformations"
+            f"Processing {len(relationships_sql)} event-object relationships and transformations in parallel"
         )
 
         all_events = await self._fetch_all_events()
@@ -893,37 +1078,34 @@ class CelonisClient:
                 )
                 continue
 
+        # Create tasks for all events with relationships
+        event_tasks = []
         for evt_key, rel_data in event_relationships.items():
-            try:
-                evt_name = rel_data["original_evt_name"]
-                obj_names = rel_data["objects"]
-                obj_sql_map = rel_data["obj_sql_map"]
+            task = self._process_single_event_relationships_with_semaphore(
+                semaphore, evt_key, rel_data, event_lookup
+            )
+            event_tasks.append(task)
 
-                event = event_lookup.get(evt_key)
-                if not event:
-                    await self._log_error(f"Event '{evt_name}' not found")
-                    continue
+        # Run all events in parallel with limited concurrency
+        if event_tasks:
+            await self._log_info(
+                f"Running {len(event_tasks)} event relationship tasks in parallel..."
+            )
+            event_results = await asyncio.gather(*event_tasks, return_exceptions=True)
 
-                new_relationships_added = await self._add_relationship_to_event(
-                    event, obj_names, evt_name
-                )
-
-                if new_relationships_added:
-                    new_obj_sql_map = {
-                        obj: obj_sql_map[obj] for obj in new_relationships_added
-                    }
-                    await self._create_relationship_factory_and_transformations(
-                        evt_name, new_obj_sql_map
+            # Check for and log any failures
+            failed_events = []
+            for i, result in enumerate(event_results):
+                if isinstance(result, Exception):
+                    evt_key = list(event_relationships.keys())[i]
+                    evt_name = event_relationships[evt_key]["original_evt_name"]
+                    failed_events.append(evt_name)
+                    await self._log_error(
+                        f"Event relationship processing failed for '{evt_name}': {str(result)}"
                     )
 
-            except Exception as e:
-                await self._log_error(
-                    f"Error processing relationships for event {evt_name}: {str(e)}"
-                )
-                import traceback
-
-                traceback.print_exc()
-                continue
+            if failed_events:
+                await self._log_error(f"Failed event relationships: {failed_events}")
 
         await self._log_info(
             "✓ Completed processing all event-object relationships and transformations"

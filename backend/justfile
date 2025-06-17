@@ -1,2 +1,2 @@
 dev:
-    uvicorn main:app --reload --ws-ping-interval=600 --ws-ping-timeout=60
+    uvicorn main:app --reload --ws-ping-interval=2400 --ws-ping-timeout=60

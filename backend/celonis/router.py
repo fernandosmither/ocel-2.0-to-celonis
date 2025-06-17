@@ -14,7 +14,7 @@ from enums import ClientCommand, ServerResponse
 class SessionManager:
     def __init__(self):
         self.sessions: Dict[str, dict] = {}
-        self.session_timeout = 300
+        self.session_timeout = 2400
 
     def create_session(self, session_id: str) -> dict:
         """Create a new session with CelonisClient and metadata."""
