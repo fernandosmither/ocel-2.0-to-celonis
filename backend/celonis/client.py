@@ -679,8 +679,7 @@ class CelonisClient:
                 "00000000-0000-0000-0000-000000000000",  # UUID for events
             )
             event_tasks.append(task)
-        #! DEBUGGING BYPASS
-        object_tasks = []
+
         # Run all object transformations in parallel
         if object_tasks:
             await self._log_info(
@@ -697,8 +696,7 @@ class CelonisClient:
                     await self._log_error(
                         f"Object transformation failed for '{object_name}': {str(result)}"
                     )
-        #! DEBUGGING BYPASS
-        event_tasks = []
+
         # Run all event transformations in parallel
         if event_tasks:
             await self._log_info(
