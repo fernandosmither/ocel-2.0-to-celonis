@@ -1,11 +1,11 @@
 import asyncio
-import httpx
+import curl_cffi.requests
 import json
 import re
 import logging
 from dotenv import load_dotenv
 import os
-from typing import Callable, Optional, Awaitable
+from typing import Callable, Optional, Awaitable, Any
 
 from cloudflare.client import R2Client
 from splitter.client import splitter
@@ -14,6 +14,127 @@ load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+class HTTPStatusError(Exception):
+    """Exception raised for HTTP status errors, mimicking httpx.HTTPStatusError."""
+
+    def __init__(self, message: str, *, request=None, response=None):
+        super().__init__(message)
+        self.request = request
+        self.response = response
+
+
+class CFFIResponse:
+    """Response wrapper that mimics httpx.Response interface."""
+
+    def __init__(self, response):
+        self._response = response
+
+    @property
+    def status_code(self) -> int:
+        return self._response.status_code
+
+    @property
+    def text(self) -> str:
+        return self._response.text
+
+    @property
+    def headers(self):
+        return self._response.headers
+
+    def json(self) -> Any:
+        return self._response.json()
+
+    def raise_for_status(self) -> None:
+        """Raise HTTPStatusError for bad status codes."""
+        if 400 <= self.status_code < 600:
+            raise HTTPStatusError(f"HTTP {self.status_code}", response=self)
+
+
+class CFFICookies:
+    """Cookies wrapper that mimics httpx cookies interface."""
+
+    def __init__(self, session):
+        self._session = session
+
+    def get(
+        self, name: str, default: Optional[str] = None, domain: Optional[str] = None
+    ) -> Optional[str]:
+        """Get a cookie by name, optionally filtered by domain."""
+        return self._session.cookies.get(name, default=default, domain=domain)
+
+    def __contains__(self, name: str) -> bool:
+        """Check if cookie exists."""
+        return self.get(name) is not None
+
+    @property
+    def jar(self):
+        """Access to underlying cookie jar for iteration."""
+        return self._session.cookies
+
+
+class CFFIClient:
+    """HTTP client wrapper that mimics httpx.AsyncClient interface using curl_cffi."""
+
+    def __init__(self, follow_redirects: bool = True, timeout: float = 60.0):
+        # Create session with authentic browser settings
+        self._session = curl_cffi.requests.AsyncSession(
+            impersonate="chrome120",
+            timeout=timeout,
+            verify=True,
+        )
+        self._follow_redirects = follow_redirects
+        self._timeout = timeout
+        self.cookies = CFFICookies(self._session)
+
+    @property
+    def headers(self):
+        """Access to session headers."""
+        return self._session.headers
+
+    async def get(self, url: str, **kwargs: Any) -> CFFIResponse:
+        """Perform GET request."""
+        follow_redirects = kwargs.pop("follow_redirects", self._follow_redirects)
+        timeout = kwargs.pop("timeout", self._timeout)
+
+        response = await self._session.get(
+            url,
+            allow_redirects=follow_redirects,
+            timeout=timeout,
+            **kwargs,
+        )
+        return CFFIResponse(response)
+
+    async def post(self, url: str, **kwargs: Any) -> CFFIResponse:
+        """Perform POST request."""
+        follow_redirects = kwargs.pop("follow_redirects", self._follow_redirects)
+        timeout = kwargs.pop("timeout", self._timeout)
+
+        response = await self._session.post(
+            url,
+            allow_redirects=follow_redirects,
+            timeout=timeout,
+            **kwargs,
+        )
+        return CFFIResponse(response)
+
+    async def put(self, url: str, **kwargs: Any) -> CFFIResponse:
+        """Perform PUT request."""
+        follow_redirects = kwargs.pop("follow_redirects", self._follow_redirects)
+        timeout = kwargs.pop("timeout", self._timeout)
+
+        response = await self._session.put(
+            url,
+            allow_redirects=follow_redirects,
+            timeout=timeout,
+            **kwargs,
+        )
+        return CFFIResponse(response)
+
+    async def aclose(self) -> None:
+        """Close the session."""
+        await self._session.close()
 
 
 # Keeping hardcoded global constants as requested
@@ -61,11 +182,9 @@ class CelonisClient:
             log_callback: Optional async callback function for forwarding log messages.
                         Should accept (level, message) where level is "info", "warning" or "error"
         """
-        self.client = httpx.AsyncClient(
+        self.client = CFFIClient(
             follow_redirects=False,
             timeout=60.0,
-            # verify=False,
-            # proxy="http://localhost:8080",
         )
         self.csrf_token = None
         self.base_url = base_url.rstrip("/")  # Remove trailing slash if present
@@ -139,7 +258,14 @@ class CelonisClient:
             self.csrf_token = self.client.cookies.get("XSRF-TOKEN") or self.csrf_token
 
         # Get MFA page to prepare for code entry
-        mfa_url = f"{BASE_LOGIN_URL}{response.headers.get('Location')}"
+        location_header = response.headers.get("Location")
+
+        # Check if Location header is already an absolute URL
+        if location_header and location_header.startswith("http"):
+            mfa_url = location_header
+        else:
+            mfa_url = f"{BASE_LOGIN_URL}{location_header}"
+
         await self.client.get(mfa_url, follow_redirects=True)
 
         # Submit MFA code
@@ -150,7 +276,7 @@ class CelonisClient:
             "Referer": mfa_url,
         }
 
-        # Now enable follow_redirects for the MFA submission
+        # Submit MFA code
         mfa_response = await self.client.post(
             f"{BASE_LOGIN_URL}/user/api/login/mfa",
             data=mfa_data,
@@ -166,7 +292,7 @@ class CelonisClient:
             logger.error("MFA authentication failed.")
             return False
 
-    async def login(self) -> httpx.Response:
+    async def login(self) -> CFFIResponse:
         """Authenticate with Celonis.
 
         Returns:
@@ -378,7 +504,7 @@ class CelonisClient:
                 await self._log_info(
                     f"✓ Created {endpoint.split('/')[-1][:-1]} type '{name}'"
                 )
-            except httpx.HTTPStatusError as e:
+            except HTTPStatusError as e:
                 body = resp.json()
                 if (
                     resp.status_code == 400
@@ -520,7 +646,7 @@ class CelonisClient:
                 f"✓ Successfully updated factory with SQL for '{type_name}' chunk {chunk_idx}"
             )
 
-        except httpx.HTTPStatusError as e:
+        except HTTPStatusError as e:
             if "update_response" in locals() and update_response.status_code == 400:
                 try:
                     error_body = update_response.json()
