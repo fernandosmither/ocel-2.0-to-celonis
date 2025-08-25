@@ -204,10 +204,10 @@ async def handle_start_login(websocket: WebSocket, session: dict, command_data: 
 
         response = await session["client"].login()
 
-        if (
-            response.status_code == 303
-            and "/user/ui/login/mfa" in response.headers.get("Location", "")
-        ):
+        if response.status_code in (
+            302,
+            303,
+        ) and "/user/ui/login/mfa" in response.headers.get("Location", ""):
             session["mfa_response"] = response
             await send_response(websocket, ServerResponse.MFA_REQUIRED)
         elif response.status_code == 200:

@@ -1129,10 +1129,10 @@ async def main():
     try:
         response = await client.login()
 
-        if (
-            response.status_code == 303
-            and "/user/ui/login/mfa" in response.headers.get("Location", "")
-        ):
+        if response.status_code in (
+            302,
+            303,
+        ) and "/user/ui/login/mfa" in response.headers.get("Location", ""):
             mfa_code = input("Please enter your MFA code: ")
             if not await client.handle_mfa(response, mfa_code):
                 await client.close()
