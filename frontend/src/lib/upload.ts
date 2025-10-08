@@ -26,10 +26,10 @@ export async function uploadFile(
     throw new UploadError('File must be a .jsonocel file');
   }
 
-  // Validate file size (e.g., max 100MB)
-  const maxSize = 100 * 1024 * 1024; // 100MB
+  // Validate file size (max )
+  const maxSize = 1 * 1024 * 1024 * 1024; // 1GB
   if (file.size > maxSize) {
-    throw new UploadError('File size must be less than 100MB');
+    throw new UploadError('File size must be less than 1GB');
   }
 
   return new Promise((resolve, reject) => {
