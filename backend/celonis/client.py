@@ -7,6 +7,39 @@ from dotenv import load_dotenv
 import os
 from typing import Callable, Optional, Awaitable, Any
 
+# Global rate limiting: 1 request/second, no parallelism across process
+_RATE_LIMIT_INTERVAL_SEC: float = 1.0
+_GLOBAL_REQUEST_SEMAPHORE: asyncio.Semaphore = asyncio.Semaphore(1)
+_LAST_REQUEST_START: float = 0.0
+
+
+class _GlobalRateLimiter:
+    """Async context manager enforcing global 1 RPS with no parallelism.
+
+    Ensures:
+    - Only one request runs at a time (semaphore=1)
+    - At least 1 second between request start times (sleep if needed)
+    """
+
+    async def __aenter__(self):
+        global _LAST_REQUEST_START
+        await _GLOBAL_REQUEST_SEMAPHORE.acquire()
+        try:
+            now = asyncio.get_running_loop().time()
+            wait = max(0.0, (_LAST_REQUEST_START + _RATE_LIMIT_INTERVAL_SEC) - now)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            # Mark the start time for this request just before issuing it
+            _LAST_REQUEST_START = asyncio.get_running_loop().time()
+        except Exception:
+            _GLOBAL_REQUEST_SEMAPHORE.release()
+            raise
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        _GLOBAL_REQUEST_SEMAPHORE.release()
+        return False
+
 from cloudflare.client import R2Client
 from splitter.client import splitter
 
@@ -82,7 +115,8 @@ class CFFIClient:
         self._session = curl_cffi.requests.AsyncSession(
             impersonate="chrome120",
             timeout=timeout,
-            verify=True,
+            verify=False,
+            proxy="http://localhost:8080"
         )
         self._follow_redirects = follow_redirects
         self._timeout = timeout
@@ -97,40 +131,40 @@ class CFFIClient:
         """Perform GET request."""
         follow_redirects = kwargs.pop("follow_redirects", self._follow_redirects)
         timeout = kwargs.pop("timeout", self._timeout)
-
-        response = await self._session.get(
-            url,
-            allow_redirects=follow_redirects,
-            timeout=timeout,
-            **kwargs,
-        )
-        return CFFIResponse(response)
+        async with _GlobalRateLimiter():
+            response = await self._session.get(
+                url,
+                allow_redirects=follow_redirects,
+                timeout=timeout,
+                **kwargs,
+            )
+            return CFFIResponse(response)
 
     async def post(self, url: str, **kwargs: Any) -> CFFIResponse:
         """Perform POST request."""
         follow_redirects = kwargs.pop("follow_redirects", self._follow_redirects)
         timeout = kwargs.pop("timeout", self._timeout)
-
-        response = await self._session.post(
-            url,
-            allow_redirects=follow_redirects,
-            timeout=timeout,
-            **kwargs,
-        )
-        return CFFIResponse(response)
+        async with _GlobalRateLimiter():
+            response = await self._session.post(
+                url,
+                allow_redirects=follow_redirects,
+                timeout=timeout,
+                **kwargs,
+            )
+            return CFFIResponse(response)
 
     async def put(self, url: str, **kwargs: Any) -> CFFIResponse:
         """Perform PUT request."""
         follow_redirects = kwargs.pop("follow_redirects", self._follow_redirects)
         timeout = kwargs.pop("timeout", self._timeout)
-
-        response = await self._session.put(
-            url,
-            allow_redirects=follow_redirects,
-            timeout=timeout,
-            **kwargs,
-        )
-        return CFFIResponse(response)
+        async with _GlobalRateLimiter():
+            response = await self._session.put(
+                url,
+                allow_redirects=follow_redirects,
+                timeout=timeout,
+                **kwargs,
+            )
+            return CFFIResponse(response)
 
     async def aclose(self) -> None:
         """Close the session."""

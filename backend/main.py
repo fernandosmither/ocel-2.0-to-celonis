@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
+import uvicorn
 
 from fastapi import FastAPI
 from config import settings
@@ -42,3 +43,6 @@ async def get():
 
 app.include_router(celonis_router)
 app.include_router(cloudflare_router)
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
