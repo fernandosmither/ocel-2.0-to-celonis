@@ -5,12 +5,14 @@ import { uploadFile, UploadError } from "@/lib/upload";
 import LoginModal from "./login-modal";
 import MfaModal from "./mfa-modal";
 import UrlSelectionModal from "./url-selection-modal";
+import RecoveryModal from "./recovery-modal";
 import { Upload, Loader2 } from "lucide-react";
 
 export default function ControlPanel() {
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [showMfaModal, setShowMfaModal] = useState(false);
   const [showUrlModal, setShowUrlModal] = useState(false);
+  const [showRecoveryModal, setShowRecoveryModal] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const {
@@ -27,6 +29,10 @@ export default function ControlPanel() {
     setFileReady,
     setSelectedBaseUrl,
     addLog,
+    recoverySummary,
+    recoveryStatus,
+    recoveryResult,
+    requestRecoverySummary,
   } = useAppStore();
 
   // No automatic connection on mount - only connect after file upload
@@ -36,6 +42,15 @@ export default function ControlPanel() {
       connect();
     }
   }, [appState, connectionStatus.connected, connect]);
+
+  useEffect(() => {
+    if (connectionStatus.connected) {
+      requestRecoverySummary();
+    }
+  }, [connectionStatus.connected, requestRecoverySummary]);
+
+  const pendingRecovery = recoverySummary?.total ?? 0;
+  const hasRecoveryQueue = pendingRecovery > 0;
 
   // Only auto-open MFA modal when MFA is required
   useEffect(() => {
@@ -248,6 +263,32 @@ export default function ControlPanel() {
         break;
     }
 
+    if (connectionStatus.connected) {
+      actions.push({
+        id: "refresh_recovery",
+        label: "CHECK RECOVERY QUEUE",
+        onClick: requestRecoverySummary,
+        variant: "default" as const,
+      });
+
+      if (recoveryStatus === "running") {
+        actions.unshift({
+          id: "recovery_running",
+          label: "RECOVERY IN PROGRESS...",
+          onClick: () => setShowRecoveryModal(true),
+          variant: "default" as const,
+          disabled: true,
+        });
+      } else if (hasRecoveryQueue) {
+        actions.unshift({
+          id: "open_recovery",
+          label: "OPEN RECOVERY MODE",
+          onClick: () => setShowRecoveryModal(true),
+          variant: "default" as const,
+        });
+      }
+    }
+
     return actions;
   };
 
@@ -312,6 +353,55 @@ export default function ControlPanel() {
             </p>
           </div>
         )}
+
+        {recoverySummary && (
+          <div className="mt-4 p-3 bg-gray-800 border border-gray-700 rounded-md space-y-2">
+            <div className="flex items-center justify-between">
+              <p className="text-sm font-mono text-gray-300">
+                Recovery queue:{" "}
+                <span
+                  className={hasRecoveryQueue ? "text-amber-300" : "text-green-400"}
+                >
+                  {pendingRecovery} pending
+                </span>
+              </p>
+              {hasRecoveryQueue && (
+                <Button
+                  variant="outline"
+                  onClick={() => setShowRecoveryModal(true)}
+                  className="border-gray-600 bg-gray-800 hover:bg-gray-700 text-gray-200 font-mono text-xs"
+                >
+                  Open Recovery
+                </Button>
+              )}
+            </div>
+            {recoverySummary.records.slice(0, 3).map((record) => (
+              <div key={record.id} className="text-xs font-mono text-gray-400">
+                <span className="text-cyan-400">{record.operation}</span>{" "}
+                <span>
+                  • attempts: {record.attempt_count} • status:{" "}
+                  {record.last_status_code ?? "n/a"}
+                </span>
+              </div>
+            ))}
+            {recoverySummary.records.length > 3 && (
+              <p className="text-xs font-mono text-gray-500">
+                +{recoverySummary.records.length - 3} more operations in queue.
+              </p>
+            )}
+          </div>
+        )}
+
+        {recoveryResult && (
+          <div className="mt-4 p-3 bg-gray-800 border border-gray-700 rounded-md">
+            <p className="text-sm font-mono text-gray-300">
+              Last recovery run:{" "}
+              <span className="text-green-400">{recoveryResult.succeeded}</span>{" "}
+              succeeded,{" "}
+              <span className="text-red-300">{recoveryResult.failed}</span> failed.
+            </p>
+          </div>
+        )}
       </section>
 
       {/* Hidden file input */}
@@ -327,6 +417,7 @@ export default function ControlPanel() {
       <UrlSelectionModal isOpen={showUrlModal} onUrlSelected={handleUrlSelected} />
       <LoginModal open={showLoginModal} onOpenChange={setShowLoginModal} />
       <MfaModal open={showMfaModal} onOpenChange={setShowMfaModal} />
+      <RecoveryModal open={showRecoveryModal} onOpenChange={setShowRecoveryModal} />
     </>
   );
 }

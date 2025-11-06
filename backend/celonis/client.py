@@ -2,13 +2,15 @@ import asyncio
 import curl_cffi.requests
 import json
 import re
-import logging
-from dotenv import load_dotenv
 import os
-from typing import Callable, Optional, Awaitable, Any
+import logging
+from typing import Any, Awaitable, Callable, Optional
+
+from dotenv import load_dotenv
 
 from cloudflare.client import R2Client
 from splitter.client import splitter
+from .retry_store import FailedRequestStore, get_failed_request_store
 
 load_dotenv()
 
@@ -82,7 +84,8 @@ class CFFIClient:
         self._session = curl_cffi.requests.AsyncSession(
             impersonate="chrome120",
             timeout=timeout,
-            verify=True,
+            verify=False,
+            proxy="http://localhost:8080",
         )
         self._follow_redirects = follow_redirects
         self._timeout = timeout
@@ -191,6 +194,7 @@ class CelonisClient:
         self.username = username
         self.password = password
         self.log_callback = log_callback
+        self.failed_request_store: FailedRequestStore = get_failed_request_store()
 
         # Construct endpoints using the provided base URL
         self.obj_endpoint = (
@@ -220,12 +224,197 @@ class CelonisClient:
         if self.log_callback:
             await self.log_callback("error", message)
 
+    def _prepare_request_payload(
+        self, method: str, url: str, kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Build a serialisable payload describing a Celonis request."""
+        payload: dict[str, Any] = {"method": method.upper(), "url": url}
+        for key, value in kwargs.items():
+            if key == "headers" and value is not None:
+                try:
+                    payload[key] = dict(value)
+                except Exception:
+                    payload[key] = repr(value)
+            else:
+                payload[key] = value
+        return payload
+
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        operation: str,
+        metadata: Optional[dict[str, Any]] = None,
+        capture_failure: bool | Callable[[CFFIResponse], bool] = True,
+        **kwargs: Any,
+    ) -> CFFIResponse:
+        """Execute a Celonis request capturing 4xx/5xx failures for recovery."""
+        response: CFFIResponse = await getattr(self.client, method)(url, **kwargs)
+
+        if 400 <= response.status_code < 600:
+            should_capture = False
+            if callable(capture_failure):
+                try:
+                    should_capture = capture_failure(response)
+                except Exception as predicate_error:
+                    await self._log_warning(
+                        f"Capture predicate raised '{predicate_error}'. Falling back to storing failure."
+                    )
+                    should_capture = True
+            else:
+                should_capture = bool(capture_failure)
+
+            if should_capture:
+                request_payload = self._prepare_request_payload(method, url, kwargs)
+                await self.failed_request_store.record_failure(
+                    operation=operation,
+                    metadata=metadata,
+                    request=request_payload,
+                    status_code=response.status_code,
+                    message=f"{method.upper()} {url} failed with {response.status_code}",
+                    response_body=response.text,
+                )
+                await self._log_error(
+                    f"Captured failed request for '{operation}' ({response.status_code}); stored for recovery."
+                )
+
+        return response
+
+    async def get_failed_requests_summary(self) -> dict[str, Any]:
+        """Return a snapshot of all failed requests currently persisted."""
+        return await self.failed_request_store.summary()
+
+    async def retry_failed_requests(
+        self,
+        *,
+        delay_seconds: float = 0.0,
+        limit: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Retry previously failed Celonis requests sequentially."""
+        records = await self.failed_request_store.all_records()
+        records.sort(key=lambda r: r.created_at)
+
+        total_available = len(records)
+        if total_available == 0:
+            await self._log_info("No failed requests to retry.")
+            return {
+                "total_available": 0,
+                "selected": 0,
+                "succeeded": 0,
+                "failed": 0,
+                "details": [],
+            }
+
+        if limit is not None and limit > 0:
+            selected_records = records[:limit]
+        else:
+            selected_records = records
+
+        selected_count = len(selected_records)
+        succeeded = 0
+        failed = 0
+        details: list[dict[str, Any]] = []
+
+        for idx, record in enumerate(selected_records, 1):
+            request_payload = dict(record.request)
+            method = request_payload.pop("method", "GET").lower()
+            url = request_payload.pop("url", "")
+
+            await self._log_info(
+                f"Retrying failed request {idx}/{selected_count}: {record.operation}"
+            )
+
+            try:
+                response: CFFIResponse = await getattr(self.client, method)(
+                    url, **request_payload
+                )
+
+                if 200 <= response.status_code < 400:
+                    await self.failed_request_store.delete(record.id)
+                    succeeded += 1
+                    details.append(
+                        {
+                            "id": record.id,
+                            "operation": record.operation,
+                            "status": "success",
+                            "status_code": response.status_code,
+                        }
+                    )
+                    await self._log_info(
+                        f"✓ Recovery succeeded for '{record.operation}' (status {response.status_code})"
+                    )
+                else:
+                    failed += 1
+                    await self.failed_request_store.append_attempt(
+                        record.id,
+                        status_code=response.status_code,
+                        message=f"Retry failed with status {response.status_code}",
+                        response_body=response.text,
+                    )
+                    details.append(
+                        {
+                            "id": record.id,
+                            "operation": record.operation,
+                            "status": "failed",
+                            "status_code": response.status_code,
+                        }
+                    )
+                    await self._log_error(
+                        f"Retry failed for '{record.operation}' (status {response.status_code})"
+                    )
+
+            except Exception as exc:
+                failed += 1
+                await self.failed_request_store.append_attempt(
+                    record.id,
+                    status_code=-1,
+                    message=str(exc),
+                    response_body=None,
+                )
+                details.append(
+                    {
+                        "id": record.id,
+                        "operation": record.operation,
+                        "status": "failed",
+                        "status_code": -1,
+                    }
+                )
+                await self._log_error(
+                    f"Retry raised exception for '{record.operation}': {exc}"
+                )
+
+            if delay_seconds > 0 and idx < selected_count:
+                await asyncio.sleep(delay_seconds)
+
+        return {
+            "total_available": total_available,
+            "selected": selected_count,
+            "succeeded": succeeded,
+            "failed": failed,
+            "details": details,
+        }
+
+    async def clear_failed_requests(self) -> None:
+        """Remove all persisted failed requests."""
+        await self.failed_request_store.clear()
+
     async def _get_csrf_token(self):
         """Initialize session and get CSRF token."""
-        await self.client.get(f"{BASE_LOGIN_URL}", follow_redirects=True)
+        await self._request(
+            "get",
+            f"{BASE_LOGIN_URL}",
+            operation="login_bootstrap",
+            capture_failure=False,
+            follow_redirects=True,
+        )
 
-        response = await self.client.get(
-            f"{BASE_LOGIN_URL}/user/", follow_redirects=True
+        response = await self._request(
+            "get",
+            f"{BASE_LOGIN_URL}/user/",
+            operation="login_fetch_user_page",
+            capture_failure=False,
+            follow_redirects=True,
         )
 
         self.csrf_token = self.client.cookies.get("XSRF-TOKEN")
@@ -266,7 +455,13 @@ class CelonisClient:
         else:
             mfa_url = f"{BASE_LOGIN_URL}{location_header}"
 
-        await self.client.get(mfa_url, follow_redirects=True)
+        await self._request(
+            "get",
+            mfa_url,
+            operation="login_mfa_page",
+            capture_failure=False,
+            follow_redirects=True,
+        )
 
         # Submit MFA code
         mfa_data = {"_csrf": self.csrf_token, "one-time-password": mfa_code}
@@ -277,11 +472,14 @@ class CelonisClient:
         }
 
         # Submit MFA code
-        mfa_response = await self.client.post(
+        mfa_response = await self._request(
+            "post",
             f"{BASE_LOGIN_URL}/user/api/login/mfa",
+            operation="login_mfa_submit",
             data=mfa_data,
             headers=mfa_headers,
             follow_redirects=True,
+            capture_failure=False,
         )
 
         logger.info(f"MFA Response Status Code: {mfa_response.status_code}")
@@ -315,8 +513,13 @@ class CelonisClient:
             "Referer": f"{BASE_LOGIN_URL}/user/ui/login",
         }
 
-        response = await self.client.post(
-            f"{BASE_LOGIN_URL}/user/api/login", data=login_data, headers=headers
+        response = await self._request(
+            "post",
+            f"{BASE_LOGIN_URL}/user/api/login",
+            operation="login_submit",
+            data=login_data,
+            headers=headers,
+            capture_failure=False,
         )
 
         return response
@@ -324,7 +527,13 @@ class CelonisClient:
     async def get_celonis_cloud_token(self):
         """Get the Celonis Cloud tokens in the client session"""
 
-        await self.client.get(self.base_url, follow_redirects=True)
+        await self._request(
+            "get",
+            self.base_url,
+            operation="post_login_base_page",
+            capture_failure=False,
+            follow_redirects=True,
+        )
 
         for cookie in self.client.cookies.jar:
             logger.debug(f"Cookie: {cookie}")
@@ -342,9 +551,21 @@ class CelonisClient:
     async def get_session_and_pac4j_token(self):
         """Get the session and pac4j token in the client session"""
         url = f"{self.base_url}/api/public/authentication/status"
-        await self.client.get(url, follow_redirects=True)
+        await self._request(
+            "get",
+            url,
+            operation="post_login_status",
+            capture_failure=False,
+            follow_redirects=True,
+        )
         url = f"{self.base_url}/api/auth-handler/commence?redirect=%2Fui%2F"
-        await self.client.get(url, follow_redirects=True)
+        await self._request(
+            "get",
+            url,
+            operation="post_login_commence",
+            capture_failure=False,
+            follow_redirects=True,
+        )
         xsrf_token = self.client.cookies.get(
             "XSRF-TOKEN", domain=self.base_url.split("://")[-1]
         )
@@ -457,6 +678,7 @@ class CelonisClient:
             require_time: Whether to ensure Time field exists
             include_color: Whether to include color in the payload
         """
+        operation_name = "create_event_type" if require_time else "create_object_type"
         for it in items:
             name = await self._sanitize_name(it["name"])
 
@@ -478,12 +700,20 @@ class CelonisClient:
             # ensure ID
             if not any(f["name"] == "ID" for f in fields):
                 fields.append(
-                    {"name": "ID", "namespace": "custom", "dataType": "CT_UTF8_STRING"}
+                    {
+                        "name": "ID",
+                        "namespace": "custom",
+                        "dataType": "CT_UTF8_STRING",
+                    }
                 )
             # for events, ensure Time
             if require_time and not any(f["name"] == "Time" for f in fields):
                 fields.append(
-                    {"name": "Time", "namespace": "custom", "dataType": "CT_INSTANT"}
+                    {
+                        "name": "Time",
+                        "namespace": "custom",
+                        "dataType": "CT_INSTANT",
+                    }
                 )
 
             payload = {
@@ -497,7 +727,26 @@ class CelonisClient:
             if include_color:
                 payload["color"] = "#4608B3"
 
-            resp = await self.client.post(endpoint, json=payload, timeout=300)
+            def should_capture(response: CFFIResponse) -> bool:
+                if response.status_code == 400:
+                    try:
+                        body = response.json()
+                        first_error = body.get("errors", [{}])[0]
+                        if first_error.get("errorCode") == "ALREADY_EXISTS":
+                            return False
+                    except Exception:
+                        return True
+                return True
+
+            resp = await self._request(
+                "post",
+                endpoint,
+                operation=operation_name,
+                metadata={"name": name},
+                capture_failure=should_capture,
+                json=payload,
+                timeout=300,
+            )
             try:
                 logger.info(resp.json())
                 resp.raise_for_status()
@@ -578,8 +827,16 @@ class CelonisClient:
                 "createdBy": {},
             }
 
-            create_response = await self.client.post(
+            create_response = await self._request(
+                "post",
                 self.factory_create_endpoint,
+                operation="create_factory",
+                metadata={
+                    "type_name": type_name,
+                    "chunk_idx": chunk_idx,
+                    "total_chunks": total_chunks,
+                    "target_kind": target_kind,
+                },
                 json=create_payload,
                 timeout=300,
             )
@@ -637,8 +894,18 @@ class CelonisClient:
                 }
             )
 
-            update_response = await self.client.put(
-                update_endpoint, json=update_payload, timeout=300
+            update_response = await self._request(
+                "put",
+                update_endpoint,
+                operation="update_factory_sql",
+                metadata={
+                    "type_name": type_name,
+                    "chunk_idx": chunk_idx,
+                    "total_chunks": total_chunks,
+                    "target_kind": target_kind,
+                },
+                json=update_payload,
+                timeout=300,
             )
             update_response.raise_for_status()
 
@@ -859,7 +1126,12 @@ class CelonisClient:
             endpoint = f"{self.base_url}/bl/api/v1/types/events?requestMode=ALL&environment=develop&pageNumber={page_number}"
 
             try:
-                response = await self.client.get(endpoint)
+                response = await self._request(
+                    "get",
+                    endpoint,
+                    operation="fetch_events_page",
+                    metadata={"page_number": page_number},
+                )
                 response.raise_for_status()
 
                 data = response.json()
@@ -943,8 +1215,17 @@ class CelonisClient:
                 f"{self.base_url}/bl/api/v1/types/events/{event_id}?environment=develop"
             )
 
-            response = await self.client.put(
-                update_endpoint, json=updated_event, timeout=300
+            response = await self._request(
+                "put",
+                update_endpoint,
+                operation="update_event_relationships",
+                metadata={
+                    "event_name": evt_name,
+                    "event_id": event_id,
+                    "relationships_added": new_relationships_added,
+                },
+                json=updated_event,
+                timeout=300,
             )
             response.raise_for_status()
 
@@ -1034,8 +1315,14 @@ class CelonisClient:
                 "createdBy": {},
             }
 
-            create_response = await self.client.post(
+            create_response = await self._request(
+                "post",
                 self.factory_create_endpoint,
+                operation="create_relationship_factory",
+                metadata={
+                    "event_name": evt_name,
+                    "relationships": list(event_obj_sql_map.keys()),
+                },
                 json=create_payload,
                 timeout=300,
             )
@@ -1114,8 +1401,16 @@ class CelonisClient:
                 }
             )
 
-            update_response = await self.client.put(
-                update_endpoint, json=update_payload, timeout=300
+            update_response = await self._request(
+                "put",
+                update_endpoint,
+                operation="update_relationship_factory",
+                metadata={
+                    "event_name": evt_name,
+                    "relationships": list(event_obj_sql_map.keys()),
+                },
+                json=update_payload,
+                timeout=300,
             )
             update_response.raise_for_status()
 

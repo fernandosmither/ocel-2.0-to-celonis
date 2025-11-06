@@ -8,6 +8,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.websockets import WebSocketState
 
 from .client import CelonisClient
+from .retry_store import get_failed_request_store
 from enums import ClientCommand, ServerResponse
 
 
@@ -149,6 +150,15 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 elif command == ClientCommand.RETRY_MFA:
                     await handle_retry_mfa(websocket, session, command_data)
+
+                elif command == ClientCommand.LIST_FAILED_REQUESTS:
+                    await handle_list_failed_requests(websocket)
+
+                elif command == ClientCommand.RETRY_FAILED_REQUESTS:
+                    await handle_retry_failed_requests(websocket, session, command_data)
+
+                elif command == ClientCommand.CLEAR_FAILED_REQUESTS:
+                    await handle_clear_failed_requests(websocket)
 
                 elif command == ClientCommand.CLOSE:
                     await handle_close(websocket, session)
@@ -311,6 +321,105 @@ async def handle_download_and_create_types(
             ServerResponse.ERROR,
             {"message": f"Processing error: {str(e)}"},
         )
+
+
+async def handle_list_failed_requests(websocket: WebSocket):
+    """Send the current failed request summary to the client."""
+    store = get_failed_request_store()
+    summary = await store.summary()
+    await send_response(
+        websocket,
+        ServerResponse.FAILED_REQUESTS_SNAPSHOT,
+        {"summary": summary},
+    )
+
+
+async def handle_retry_failed_requests(
+    websocket: WebSocket, session: dict, command_data: dict
+):
+    """Retry previously failed Celonis requests."""
+    if not session.get("client"):
+        await send_response(
+            websocket,
+            ServerResponse.ERROR,
+            {"message": "No active client session. Please login first."},
+        )
+        return
+
+    delay_ms = command_data.get("delay_ms", 0)
+    limit = command_data.get("limit")
+
+    try:
+        delay_ms_value = float(delay_ms) if delay_ms is not None else 0.0
+    except (TypeError, ValueError):
+        delay_ms_value = 0.0
+
+    delay_seconds = max(delay_ms_value, 0.0) / 1000.0
+
+    limit_value: Optional[int] = None
+    if isinstance(limit, (int, float)):
+        if limit > 0:
+            limit_value = int(limit)
+
+    store = get_failed_request_store()
+    pre_summary = await store.summary()
+
+    if pre_summary["total"] == 0:
+        await send_response(
+            websocket,
+            ServerResponse.ERROR,
+            {"message": "No failed requests queued for recovery."},
+        )
+        return
+
+    await send_response(
+        websocket,
+        ServerResponse.RECOVERY_STARTED,
+        {
+            "pending": pre_summary["total"],
+            "delay_seconds": delay_seconds,
+            "limit": limit_value,
+        },
+    )
+
+    client: CelonisClient = session["client"]
+
+    try:
+        result = await client.retry_failed_requests(
+            delay_seconds=delay_seconds, limit=limit_value
+        )
+
+        await send_response(
+            websocket,
+            ServerResponse.RECOVERY_COMPLETE,
+            {"result": result},
+        )
+    except Exception as e:
+        await send_response(
+            websocket,
+            ServerResponse.ERROR,
+            {"message": f"Recovery error: {str(e)}"},
+        )
+        return
+
+    post_summary = await store.summary()
+    await send_response(
+        websocket,
+        ServerResponse.FAILED_REQUESTS_SNAPSHOT,
+        {"summary": post_summary},
+    )
+
+
+async def handle_clear_failed_requests(websocket: WebSocket):
+    """Clear all persisted failed requests."""
+    store = get_failed_request_store()
+    await store.clear()
+    summary = await store.summary()
+    await send_response(
+        websocket,
+        ServerResponse.FAILED_REQUESTS_SNAPSHOT,
+        {"summary": summary},
+    )
 
 
 async def handle_retry_login(websocket: WebSocket, session: dict, command_data: dict):

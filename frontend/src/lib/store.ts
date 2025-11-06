@@ -5,6 +5,9 @@ import type {
   ConnectionStatus,
   ServerResponse,
   ClientCommand,
+  FailedRequestsSummary,
+  RecoveryStatus,
+  RecoveryResult,
 } from "./types";
 import { CONFIG } from "./config";
 
@@ -26,6 +29,11 @@ interface AppStore {
 
   // Login error state
   loginError: string | null;
+
+  // Recovery queue state
+  recoverySummary: FailedRequestsSummary | null;
+  recoveryStatus: RecoveryStatus;
+  recoveryResult: RecoveryResult | null;
 
   // Actions
   setAppState: (state: AppState) => void;
@@ -50,6 +58,14 @@ interface AppStore {
 
   // Login error management
   setLoginError: (error: string | null) => void;
+
+  // Recovery management
+  setRecoverySummary: (summary: FailedRequestsSummary | null) => void;
+  setRecoveryStatus: (status: RecoveryStatus) => void;
+  setRecoveryResult: (result: RecoveryResult | null) => void;
+  requestRecoverySummary: () => void;
+  startRecovery: (options?: { delayMs?: number; limit?: number }) => void;
+  clearRecoveryQueue: () => void;
 }
 
 export const useAppStore = create<AppStore>((set, get) => ({
@@ -62,6 +78,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
   uploadProgress: 0,
   selectedBaseUrl: null,
   loginError: null,
+  recoverySummary: null,
+  recoveryStatus: "idle",
+  recoveryResult: null,
 
   // Basic actions
   setAppState: (state) => set({ appState: state }),
@@ -238,11 +257,82 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   // Login error management
   setLoginError: (error) => set({ loginError: error }),
+
+  // Recovery management
+  setRecoverySummary: (summary) =>
+    set((state) => ({
+      recoverySummary: summary,
+      recoveryStatus: summary && summary.total > 0 ? "ready" : "idle",
+      recoveryResult: summary && summary.total > 0 ? state.recoveryResult : null,
+    })),
+
+  setRecoveryStatus: (status) => set({ recoveryStatus: status }),
+
+  setRecoveryResult: (result) => set({ recoveryResult: result }),
+
+  requestRecoverySummary: () => {
+    const { sendCommand, addLog } = get();
+    addLog({
+      level: "info",
+      message: "Requesting recovery queue snapshot",
+    });
+    sendCommand({ command: "list_failed_requests" });
+  },
+
+  startRecovery: (options = {}) => {
+    const { sendCommand, addLog } = get();
+    const payload: ClientCommand = {
+      command: "retry_failed_requests",
+    };
+
+    if (typeof options.delayMs === "number") {
+      payload.delay_ms = options.delayMs;
+    }
+    if (typeof options.limit === "number" && options.limit > 0) {
+      payload.limit = options.limit;
+    }
+
+    set({ recoveryStatus: "running", recoveryResult: null });
+
+    const pieces = [];
+    if (payload.delay_ms !== undefined) {
+      pieces.push(`delay ${payload.delay_ms}ms`);
+    }
+    if (payload.limit !== undefined) {
+      pieces.push(`limit ${payload.limit}`);
+    }
+
+    addLog({
+      level: "info",
+      message:
+        "Starting recovery run" +
+        (pieces.length ? ` (${pieces.join(", ")})` : ""),
+    });
+
+    sendCommand(payload);
+  },
+
+  clearRecoveryQueue: () => {
+    const { sendCommand, addLog } = get();
+    addLog({
+      level: "info",
+      message: "Clearing recovery queue",
+    });
+    sendCommand({ command: "clear_failed_requests" });
+  },
 }));
 
 // Handle server responses
 function handleServerResponse(response: ServerResponse) {
-  const { addLog, setAppState, connectionStatus, setLoginError } = useAppStore.getState();
+  const {
+    addLog,
+    setAppState,
+    connectionStatus,
+    setLoginError,
+    setRecoverySummary,
+    setRecoveryStatus,
+    setRecoveryResult,
+  } = useAppStore.getState();
 
   switch (response.type) {
     case "connected":
@@ -313,6 +403,64 @@ function handleServerResponse(response: ServerResponse) {
         message: "Types creation completed successfully",
       });
       break;
+
+    case "failed_requests_snapshot":
+      if (response.summary) {
+        setRecoverySummary(response.summary);
+        if (response.summary.total > 0) {
+          addLog({
+            level: "warning",
+            message: `${response.summary.total} requests pending recovery`,
+          });
+        } else {
+          addLog({
+            level: "info",
+            message: "Recovery queue is empty",
+          });
+        }
+      } else {
+        setRecoverySummary(null);
+      }
+      break;
+
+    case "recovery_started": {
+      setRecoveryStatus("running");
+      const parts = [];
+      if (typeof response.pending === "number") {
+        parts.push(`${response.pending} queued requests`);
+      }
+      if (typeof response.delay_seconds === "number") {
+        parts.push(`delay ${response.delay_seconds}s`);
+      }
+      if (typeof response.limit === "number") {
+        parts.push(`limit ${response.limit}`);
+      }
+      addLog({
+        level: "info",
+        message: `Recovery started${parts.length ? ` (${parts.join(", ")})` : ""}`,
+      });
+      break;
+    }
+
+    case "recovery_complete": {
+      const result = response.result as RecoveryResult | undefined;
+      if (result) {
+        setRecoveryResult(result);
+        const level = result.failed > 0 ? "warning" : "success";
+        addLog({
+          level,
+          message: `Recovery completed: ${result.succeeded} succeeded, ${result.failed} failed`,
+        });
+        setRecoveryStatus(result.failed > 0 ? "ready" : "idle");
+      } else {
+        addLog({
+          level: "info",
+          message: "Recovery completed",
+        });
+        setRecoveryStatus("idle");
+      }
+      break;
+    }
 
     case "error":
       setAppState("error");
