@@ -42,4 +42,4 @@ ENTRYPOINT []
 EXPOSE 8080
 
 # Run the FastAPI application in production mode
-CMD ["uv", "run", "uvicorn", "main:app", "--ws-ping-interval=2400", "--ws-ping-timeout=60", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uv", "run", "uvicorn", "main:app", "--ws-ping-interval=43200", "--ws-ping-timeout=60", "--host", "0.0.0.0", "--port", "8080"]
